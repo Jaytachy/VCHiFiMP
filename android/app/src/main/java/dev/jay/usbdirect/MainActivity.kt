@@ -7,6 +7,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.os.Build
+import android.util.Log
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -74,6 +78,12 @@ class MainActivity : ComponentActivity() {
                         Text(status, style = MaterialTheme.typography.bodySmall)
 
                         Button(onClick = { refreshDevices() }) { Text("Scan USB devices") }
+
+                        OutlinedButton(onClick = {
+                            val report = probeUsbAudio()
+                            Log.i("VCProbe", report)
+                            status = report
+                        }) { Text("Probe USB audio path") }
 
                         devices.forEach { d ->
                             OutlinedButton(
@@ -167,6 +177,36 @@ class MainActivity : ComponentActivity() {
                 )
             )
         }
+    }
+
+    /** Answers the one architectural question: does this device offer
+     *  MIX_BEHAVIOR_BIT_PERFECT, i.e. can we bypass AudioFlinger's mixer
+     *  without root? */
+    private fun probeUsbAudio(): String {
+        if (Build.VERSION.SDK_INT < 33) return "needs Android 13+"
+        val am = getSystemService(AudioManager::class.java) ?: return "no AudioManager"
+        val sb = StringBuilder()
+        val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        for (d in outs) {
+            if (d.type != AudioDeviceInfo.TYPE_USB_HEADSET &&
+                d.type != AudioDeviceInfo.TYPE_USB_DEVICE) continue
+            sb.append("USB id=${d.id} type=${d.type} name=${d.productName}\n")
+            sb.append("  rates=${d.sampleRates.joinToString(",")}\n")
+            sb.append("  encodings=${d.encodings.joinToString(",")}\n")
+            try {
+                val attrs = am.getSupportedMixerAttributes(d)
+                if (attrs.isEmpty()) sb.append("  mixer: none\n")
+                for (m in attrs) {
+                    sb.append("  mixer behavior=${m.mixerBehavior} " +
+                              "format=${m.format} rate=${m.sampleRate} " +
+                              "mask=0x${m.channelMask.toString(16)}\n")
+                }
+            } catch (t: Throwable) {
+                sb.append("  mixer query failed: ${t.message}\n")
+            }
+        }
+        if (sb.isEmpty()) sb.append("no USB audio output found")
+        return sb.toString()
     }
 
     private fun play() {

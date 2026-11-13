@@ -48,11 +48,50 @@ Two real DACs were characterised through raw usbfs:
 | Jieli `3654:4a55` | adaptive endpoint, 44.1/48/96 kHz, S16 + S24_3LE. Measured ±2 ppm at 96k/24, no wow. Good. |
 | AB13X `0020:0b21` | 48k/16 only, free-runs ~+1400 ppm and re-corrects every 5 s. Sounds broken on piano. Avoid. |
 
+`libusbdac` also used a real AB13X to validate its UAC1 parser (their fixture
+is 8000/48000 Hz, EP 0x01, maxpkt 192, bInterval 4 — a different firmware to
+ours). They report no audio-quality observations; bit-perfect delivery cannot
+fix this chip, because its wobble happens after the samples arrive, inside its
+own clocking.
+
 ## Status
 
-Working on Linux. Android compiles, but see `README` notes on interface
-ownership: a stock Android kernel keeps `snd-usb-audio` bound to the DAC, and
-usbfs cannot steal an interface a kernel driver owns without root.
+Working on Linux (measured, see below). Android builds and runs, and does not
+need root — see the claim sequence.
+
+## Android: taking the interface from the kernel
+
+A stock Android kernel keeps `snd-usb-audio` bound to the DAC as soon as it is
+plugged in, because that is how the framework's USB audio support works. usbfs
+cannot claim an interface a kernel driver owns.
+
+The obvious fix, `claimInterface(force=true)`, does not work. Android's native
+implementation issues `USBDEVFS_DISCONNECT` and then immediately claims the
+interface for the caller. The kernel's `SETCONFIGURATION` handler refuses to
+switch configuration while *anyone* holds *any* interface — including the
+caller — so the switch always fails.
+
+What works instead, with no privileges beyond normal USB permission:
+
+1. for every interface in the current configuration, issue
+   `USBDEVFS_IOCTL` + `USBDEVFS_DISCONNECT` (claim nothing)
+2. `USBDEVFS_SETCONFIGURATION` — now succeeds, and resets all alt settings
+3. claim the AudioControl interface and the streaming interface at alt 0
+4. `USBDEVFS_SETINTERFACE` to the chosen alt setting
+5. `SET_CUR` sampling frequency on the endpoint
+
+`USBDEVFS_DISCONNECT` via `USBDEVFS_IOCTL` needs no `CAP_SYS_ADMIN`, unlike
+`USBDEVFS_DISCONNECT_CLAIM`. Android's SELinux policy grants apps
+`usb_device:chr_file { read write getattr ioctl }` with no `allowxperm`
+narrowing, so this is permitted for ordinary apps.
+
+Credit where due: this sequence is documented in
+[ostrichbat2k/libusbdac](https://github.com/ostrichbat2k/libusbdac) (GPL-3.0)
+and [unom-io/usbfs-iso](https://github.com/unom-io/usbfs-iso) (Apache-2.0).
+The implementation here is independent; no code was copied.
+
+Note: the sweep evicts *every* interface, including HID (inline remotes), and
+those are never re-bound by the app. Release the device when done.
 
 ## Build
 

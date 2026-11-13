@@ -414,14 +414,46 @@ struct uae *uae_open(int fd, int rate, int bits)
     e->volume  = 1.0f;
     e->ppm     = 0.0;
 
-    /* Detach the kernel driver if one is bound (needs CAP_SYS_ADMIN). */
-    struct usbdevfs_disconnect_claim dc;
-    memset(&dc, 0, sizeof(dc));
-    dc.interface = (unsigned)e->iface;
-    dc.flags = USBDEVFS_DISCONNECT_CLAIM_IF_DRIVER;
-    strncpy(dc.driver, "snd-usb-audio", sizeof(dc.driver) - 1);
-    if (ioctl(fd, USBDEVFS_DISCONNECT_CLAIM, &dc) < 0 && errno != EPERM) {
-        /* EBUSY here means somebody else owns it; keep going and let claim say so */
+    /* Android keeps snd-usb-audio bound to the DAC. claimInterface(force=true)
+     * evicts it but then claims the interface for us, after which the kernel's
+     * SETCONFIGURATION handler refuses to switch because *someone* still holds
+     * an interface. So: disconnect every interface ourselves, claim nothing,
+     * switch configuration, and claim only afterwards. USBDEVFS_DISCONNECT via
+     * USBDEVFS_IOCTL needs no CAP_SYS_ADMIN, unlike USBDEVFS_DISCONNECT_CLAIM. */
+    int swept = 0;
+    for (int i = 0; i + 1 < total; ) {
+        int len = cfg[i], type = cfg[i + 1];
+        if (len < 2 || i + len > total) break;
+        if (type == USB_DT_INTERFACE) {
+            struct usbdevfs_ioctl ctl;
+            memset(&ctl, 0, sizeof(ctl));
+            ctl.ifno = cfg[i + 2];
+            ctl.ioctl_code = USBDEVFS_DISCONNECT;
+            ctl.data = NULL;
+            if (ioctl(fd, USBDEVFS_IOCTL, &ctl) == 0) swept++;
+        }
+        i += len;
+    }
+    if (swept == 0)
+        set_err(e, "could not release kernel drivers from any interface");
+
+    unsigned int cfgval = (unsigned)cfg[5];
+    if (ioctl(fd, USBDEVFS_SETCONFIGURATION, &cfgval) < 0 && errno != EBUSY) {
+        set_err(e, "SETCONFIGURATION: %s", strerror(errno));
+        return e;
+    }
+
+    /* claim the AudioControl interface (class 1, subclass 1) as well */
+    for (int i = 0; i + 1 < total; ) {
+        int len = cfg[i], type = cfg[i + 1];
+        if (len < 2 || i + len > total) break;
+        if (type == USB_DT_INTERFACE && cfg[i + 5] == 0x01 && cfg[i + 6] == 0x01) {
+            unsigned int ac = cfg[i + 2];
+            if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &ac) < 0)
+                set_err(e, "warning: claim control iface %u: %s", ac, strerror(errno));
+            break;
+        }
+        i += len;
     }
 
     unsigned int iface = (unsigned)e->iface;
