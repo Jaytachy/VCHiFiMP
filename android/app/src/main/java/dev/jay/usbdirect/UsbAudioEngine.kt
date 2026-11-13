@@ -56,6 +56,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
             return UsbAudioEngine(h)
         }
 
+        @JvmStatic
         private external fun nativeOpen(fd: Int, rate: Int, bits: Int): Long
     }
 }

@@ -59,6 +59,21 @@ own clocking.
 Working on Linux (measured, see below). Android builds and runs, and does not
 need root — see the claim sequence.
 
+## Verified on hardware
+
+Samsung Galaxy A54 5G (SM-A546E/DS), Android 17 / One UI 9, kernel 5.15.197,
+SELinux enforcing, **unrooted, bootloader locked, Knox intact**.
+
+- `snd-usb-audio` binds all three audio interfaces of the Jieli as soon as it
+  is plugged in (confirmed in sysfs).
+- `AudioManager.getSupportedMixerAttributes()` reports `MIXER_BEHAVIOR_DEFAULT`
+  only — Samsung does **not** expose bit-perfect mixing, so that shortcut is
+  unavailable. Raw usbfs is the only path.
+- The disconnect-sweep sequence below works with ordinary USB permission: after
+  opening the device and running it, `/sys/bus/usb/drivers/snd-usb-audio/`
+  contains no interface links at all, and the engine streams 48 kHz / 24-bit
+  isochronous URBs with no errors.
+
 ## Android: taking the interface from the kernel
 
 A stock Android kernel keeps `snd-usb-audio` bound to the DAC as soon as it is

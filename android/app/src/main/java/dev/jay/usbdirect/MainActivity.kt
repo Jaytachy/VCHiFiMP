@@ -12,7 +12,6 @@ import android.media.AudioManager
 import android.os.Build
 import android.util.Log
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -59,6 +58,24 @@ class MainActivity : ComponentActivity() {
         val flags = if (Build.VERSION.SDK_INT >= 33)
             Context.RECEIVER_NOT_EXPORTED else 0
         registerReceiver(permissionReceiver, IntentFilter(ACTION_USB_PERMISSION), flags)
+
+        // run the audio-path probe on launch so it lands in logcat unattended
+        runCatching { Log.i("VCProbe", probeUsbAudio()) }
+
+        // one-tap test: ask for USB permission, then play a tone through raw usbfs
+        usbManager.deviceList.values.firstOrNull { d ->
+            (0 until d.interfaceCount).any {
+                d.getInterface(it).interfaceClass == android.hardware.usb.UsbConstants.USB_CLASS_AUDIO
+            }
+        }?.let { d ->
+            chosenDevice = d
+            withPermission(d) {
+                Log.i("VCProbe", "starting raw usbfs tone on ${d.deviceName}")
+                playing = true
+                status = "raw usbfs tone"
+                player.startTone(d, rate, bits, volume, 5)
+            }
+        }
 
         player.onInfo = { status = it }
         player.onError = { status = "error: $it" }
@@ -137,6 +154,17 @@ class MainActivity : ComponentActivity() {
                             }
                         )
 
+                        OutlinedButton(onClick = {
+                            val d = chosenDevice ?: devices.firstOrNull()
+                            if (d == null) { status = "no USB device"; return@OutlinedButton }
+                            chosenDevice = d
+                            withPermission(d) {
+                                playing = true
+                                status = "tone: opening raw usbfs"
+                                player.startTone(d, rate, bits, volume, 5)
+                            }
+                        }) { Text("Test tone 5 s") }
+
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Button(
                                 enabled = chosenDevice != null && chosenUri != null && !playing,
@@ -165,18 +193,22 @@ class MainActivity : ComponentActivity() {
 
     private fun selectDevice(d: UsbDevice) {
         chosenDevice = d
+        withPermission(d) { status = "selected ${d.productName}" }
+    }
+
+    private fun withPermission(d: UsbDevice, action: () -> Unit) {
         if (usbManager.hasPermission(d)) {
-            status = "selected ${d.productName}"
-        } else {
-            pendingAction = { status = "selected ${d.productName}" }
-            usbManager.requestPermission(
-                d,
-                PendingIntent.getBroadcast(
-                    this, 0, Intent(ACTION_USB_PERMISSION),
-                    PendingIntent.FLAG_IMMUTABLE
-                )
-            )
+            action()
+            return
         }
+        pendingAction = action
+        usbManager.requestPermission(
+            d,
+            PendingIntent.getBroadcast(
+                this, 0, Intent(ACTION_USB_PERMISSION),
+                PendingIntent.FLAG_IMMUTABLE
+            )
+        )
     }
 
     /** Answers the one architectural question: does this device offer
@@ -197,9 +229,11 @@ class MainActivity : ComponentActivity() {
                 val attrs = am.getSupportedMixerAttributes(d)
                 if (attrs.isEmpty()) sb.append("  mixer: none\n")
                 for (m in attrs) {
+                    val f = m.format
                     sb.append("  mixer behavior=${m.mixerBehavior} " +
-                              "format=${m.format} rate=${m.sampleRate} " +
-                              "mask=0x${m.channelMask.toString(16)}\n")
+                              "encoding=0x${f.encoding.toString(16)} " +
+                              "rate=${f.sampleRate} " +
+                              "mask=0x${f.channelMask.toString(16)}\n")
                 }
             } catch (t: Throwable) {
                 sb.append("  mixer query failed: ${t.message}\n")

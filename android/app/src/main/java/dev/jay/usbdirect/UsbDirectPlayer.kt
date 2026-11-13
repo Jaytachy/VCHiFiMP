@@ -8,6 +8,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -32,7 +33,15 @@ class UsbDirectPlayer(private val context: Context) {
 
     val isRunning: Boolean get() = running
 
-    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float) {
+    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float) =
+        startInternal(device, rate, bits, volume) { eng -> decodeLoop(uri, eng, rate) }
+
+    /** Plays a 1 kHz tone straight from native, no decoding involved. */
+    fun startTone(device: UsbDevice, rate: Int, bits: Int, volume: Float, seconds: Int) =
+        startInternal(device, rate, bits, volume) { eng -> playTone(eng, rate, seconds) }
+
+    private fun startInternal(device: UsbDevice, rate: Int, bits: Int, volume: Float,
+                              body: (UsbAudioEngine) -> Unit) {
         stop()
         running = true
         thread = Thread {
@@ -54,8 +63,9 @@ class UsbDirectPlayer(private val context: Context) {
                 eng.setVolume(volume)
 
                 onInfo?.invoke("engine: ${rate} Hz / $bits-bit")
-                decodeLoop(uri, eng, rate)
+                body(eng)
             } catch (t: Throwable) {
+                Log.e("VCProbe", "engine failed: ${t.message}", t)
                 if (running) onError?.invoke(t.message ?: t.toString())
             } finally {
                 eng?.close()
@@ -81,6 +91,28 @@ class UsbDirectPlayer(private val context: Context) {
 
     fun setVolume(v: Float) { engine?.setVolume(v) }
     fun setPpm(ppm: Float) { engine?.setPpm(ppm) }
+
+    private fun playTone(eng: UsbAudioEngine, rate: Int, seconds: Int) {
+        val chunk = 1024
+        val buf = ByteBuffer.allocateDirect(chunk * 2 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        val total = rate.toLong() * seconds
+        var written = 0L
+        var phase = 0.0
+        val step = 2.0 * Math.PI * 1000.0 / rate
+        while (running && written < total) {
+            buf.clear()
+            for (i in 0 until chunk) {
+                val v = (0.25 * kotlin.math.sin(phase)).toFloat()
+                phase += step
+                if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI
+                buf.put(v); buf.put(v)
+            }
+            buf.flip()
+            if (eng.write(buf, chunk) < 0) break
+            written += chunk
+        }
+    }
 
     // ------------------------------------------------------------- decoding
 

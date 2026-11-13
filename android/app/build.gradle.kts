@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "dev.jay.usbdirect"
     compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "dev.jay.usbdirect"
