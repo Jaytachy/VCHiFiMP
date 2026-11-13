@@ -87,6 +87,8 @@ struct uae {
 
     float volume;
     double ppm;
+    unsigned cfgval;
+    int ctrl_iface;
 
     volatile int running;
     volatile int failed;
@@ -388,6 +390,7 @@ struct uae *uae_open(int fd, int rate, int bits)
     struct uae *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->fd = fd;
+    e->ctrl_iface = -1;
     pthread_mutex_init(&e->lock, NULL);
     pthread_cond_init(&e->can_read, NULL);
     pthread_cond_init(&e->can_write, NULL);
@@ -460,6 +463,7 @@ struct uae *uae_open(int fd, int rate, int bits)
          e->iface, e->alt, e->ep, e->maxpkt, e->bpf, swept);
 
     unsigned int cfgval = (unsigned)cfg[5];
+    e->cfgval = cfgval;
     if (ioctl(fd, USBDEVFS_SETCONFIGURATION, &cfgval) < 0 && errno != EBUSY) {
         set_err(e, "SETCONFIGURATION: %s", strerror(errno));
         return e;
@@ -471,6 +475,7 @@ struct uae *uae_open(int fd, int rate, int bits)
         if (len < 2 || i + len > total) break;
         if (type == USB_DT_INTERFACE && cfg[i + 5] == 0x01 && cfg[i + 6] == 0x01) {
             unsigned int ac = cfg[i + 2];
+            e->ctrl_iface = (int)ac;
             if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &ac) < 0)
                 set_err(e, "warning: claim control iface %u: %s", ac, strerror(errno));
             break;
@@ -503,6 +508,19 @@ struct uae *uae_open(int fd, int rate, int bits)
     /* Not fatal: some devices ignore SET_CUR and derive the rate from the
        alt setting. Keep going. */
     (void)ctrl(fd, 0x22, 0x01, 0x0100, (uint16_t)e->ep, 3, fr);
+
+    /* Read it back from the device itself -- this is the only claim about the
+     * sample rate that does not come from our own bookkeeping. */
+    unsigned char back[3] = {0, 0, 0};
+    int got = ctrl(fd, 0xA2, 0x81, 0x0100, (uint16_t)e->ep, 3, back);
+    if (got >= 3) {
+        unsigned dev_rate = back[0] | (back[1] << 8) | (back[2] << 16);
+        LOGI("uae: requested Fs=%u, device GET_CUR Fs=%u", rate, dev_rate);
+        if (dev_rate != (unsigned)rate)
+            LOGI("uae: WARNING device reports a different rate than requested");
+    } else {
+        LOGI("uae: GET_CUR sampling frequency unsupported (%d)", got);
+    }
 
     e->ring = malloc(sizeof(float) * RING_FRAMES * (size_t)e->channels);
     if (!e->ring) { set_err(e, "ring alloc failed"); return e; }
@@ -572,8 +590,28 @@ void uae_close(struct uae *e)
     pthread_mutex_unlock(&e->lock);
     if (e->started) pthread_join(e->thread, NULL);
 
+    /* Drop our claims and alt setting first: SETCONFIGURATION is refused while
+     * anyone (including us) holds an interface. */
+    struct usbdevfs_setinterface si0;
+    si0.interface = (unsigned)e->iface;
+    si0.altsetting = 0;
+    ioctl(e->fd, USBDEVFS_SETINTERFACE, &si0);
+
     unsigned int iface = (unsigned)e->iface;
     ioctl(e->fd, USBDEVFS_RELEASEINTERFACE, &iface);
+    if (e->ctrl_iface >= 0) {
+        unsigned int ac = (unsigned)e->ctrl_iface;
+        ioctl(e->fd, USBDEVFS_RELEASEINTERFACE, &ac);
+    }
+
+    /* Re-issue SETCONFIGURATION so the kernel re-probes the interfaces and
+     * snd-usb-audio rebinds. Without this, Android's own USB audio stays dead
+     * until the user replugs the DAC. */
+    unsigned int cv = e->cfgval;
+    if (ioctl(e->fd, USBDEVFS_SETCONFIGURATION, &cv) < 0)
+        LOGE("uae: restore SETCONFIGURATION failed: %s", strerror(errno));
+    else
+        LOGI("uae: configuration re-issued, kernel drivers should rebind");
 
     free(e->ring);
     pthread_mutex_destroy(&e->lock);

@@ -22,6 +22,11 @@ import java.nio.FloatBuffer
  */
 class UsbDirectPlayer(private val context: Context) {
 
+    companion object {
+        private val SUPPORTED_RATES = setOf(44100, 48000, 96000)
+    }
+
+
     var onError: ((String) -> Unit)? = null
     var onFinished: (() -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
@@ -33,8 +38,37 @@ class UsbDirectPlayer(private val context: Context) {
 
     val isRunning: Boolean get() = running
 
-    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float) =
-        startInternal(device, rate, bits, volume) { eng -> decodeLoop(uri, eng, rate) }
+    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float) {
+        // Play at the file's own rate when the DAC supports it, so nothing is
+        // resampled; otherwise fall back to the requested rate.
+        val src = probeRate(uri)
+        val dev = if (src in SUPPORTED_RATES) src else rate
+        Log.i("VCProbe", "source=" + src + " Hz -> device=" + dev + " Hz" +
+                if (src == dev) " (bit-perfect path, no resample)" else " (resampled)")
+        startInternal(device, dev, bits, volume) { eng -> decodeLoop(uri, eng, dev) }
+    }
+
+    private fun probeRate(uri: Uri): Int {
+        val ex = MediaExtractor()
+        return try {
+            if (uri.scheme == "file") ex.setDataSource(uri.path!!)
+            else context.contentResolver.openFileDescriptor(uri, "r")!!.use {
+                ex.setDataSource(it.fileDescriptor)
+            }
+            var r = 0
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val m = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (m.startsWith("audio/")) { r = f.getInteger(MediaFormat.KEY_SAMPLE_RATE); break }
+            }
+            r
+        } catch (t: Throwable) {
+            Log.e("VCProbe", "probeRate failed: " + t.message)
+            0
+        } finally {
+            ex.release()
+        }
+    }
 
     /** Plays a 1 kHz tone straight from native, no decoding involved. */
     fun startTone(device: UsbDevice, rate: Int, bits: Int, volume: Float, seconds: Int) =
@@ -172,12 +206,10 @@ class UsbDirectPlayer(private val context: Context) {
             total += n
             if (reads % 50 == 0) Log.i("VCProbe", "raw reads=" + reads + " bytes=" + total + " enc=" + pcmEncoding)
             buf.position(0); buf.limit(n)
-            if (pcmEncoding == 4) {          // PCM_FLOAT
-                val fb = buf.asFloatBuffer()
-                sink.pushFloat(fb)
-            } else {
-                val sb = buf.asShortBuffer()
-                sink.pushShorts(sb)
+            when (pcmEncoding) {
+                4 -> sink.pushFloat(buf.asFloatBuffer())      // PCM_FLOAT
+                21 -> sink.push24(buf)                        // PCM_24BIT_PACKED
+                else -> sink.pushShorts(buf.asShortBuffer())  // PCM_16BIT
             }
             extractor.advance()
         }
@@ -218,8 +250,11 @@ class UsbDirectPlayer(private val context: Context) {
                     if (info.size > 0) {
                         val enc = if (format.containsKey(MediaFormat.KEY_PCM_ENCODING))
                             format.getInteger(MediaFormat.KEY_PCM_ENCODING) else 2
-                        if (enc == 4) sink.pushFloat(ob.asFloatBuffer())
-                        else sink.pushShorts(ob.asShortBuffer())
+                        when (enc) {
+                            4 -> sink.pushFloat(ob.asFloatBuffer())
+                            21 -> sink.push24(ob)
+                            else -> sink.pushShorts(ob.asShortBuffer())
+                        }
                     }
                     codec.releaseOutputBuffer(outIdx, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
@@ -264,6 +299,26 @@ class UsbDirectPlayer(private val context: Context) {
                 frame(l, r)
             }
             flushChunk()
+        }
+
+        fun push24(buf: ByteBuffer) {
+            val frames = buf.remaining() / (3 * srcCh)
+            for (i in 0 until frames) {
+                val l = read24(buf)
+                val r = if (srcCh >= 2) read24(buf) else l
+                for (k in 2 until srcCh) buf.position(buf.position() + 3)
+                frame(l, r)
+            }
+            flushChunk()
+        }
+
+        private fun read24(b: ByteBuffer): Float {
+            val b0 = b.get().toInt() and 0xFF
+            val b1 = b.get().toInt() and 0xFF
+            val b2 = b.get().toInt()
+            var v = (b2 shl 16) or (b1 shl 8) or b0
+            if (v and 0x800000 != 0) v = v or -0x1000000
+            return v / 8388608f
         }
 
         fun pushFloat(buf: FloatBuffer) {

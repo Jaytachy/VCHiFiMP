@@ -2,17 +2,20 @@ package dev.jay.usbdirect
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
-import android.os.Build
-import android.util.Log
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -28,18 +31,29 @@ import androidx.compose.ui.unit.dp
 class MainActivity : ComponentActivity() {
 
     private lateinit var usbManager: UsbManager
-    private val player by lazy { UsbDirectPlayer(this) }
 
     private var status by mutableStateOf("idle")
     private var devices by mutableStateOf<List<UsbDevice>>(emptyList())
     private var chosenDevice by mutableStateOf<UsbDevice?>(null)
     private var chosenUri by mutableStateOf<Uri?>(null)
-    private var rate by mutableStateOf(48000)
     private var bits by mutableStateOf(24)
     private var volume by mutableStateOf(0.6f)
     private var playing by mutableStateOf(false)
 
+    private var service: PlaybackService? by mutableStateOf(null)
+    private var autoPlayRequested = false
     private var pendingAction: (() -> Unit)? = null
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            service = (binder as PlaybackService.LocalBinder).service()
+            service?.setVolume(volume)
+            if (autoPlayRequested) { autoPlayRequested = false; debugAutoPlay() }
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+        }
+    }
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -54,42 +68,22 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        autoPlayRequested = intent?.getBooleanExtra("autoplay", false) == true
 
-        val flags = if (Build.VERSION.SDK_INT >= 33)
-            Context.RECEIVER_NOT_EXPORTED else 0
+        val flags = if (Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0
         registerReceiver(permissionReceiver, IntentFilter(ACTION_USB_PERMISSION), flags)
 
-        // run the audio-path probe on launch so it lands in logcat unattended
-        runCatching { Log.i("VCProbe", probeUsbAudio()) }
+        bindService(
+            Intent(this, PlaybackService::class.java),
+            connection, Context.BIND_AUTO_CREATE
+        )
 
-        // scriptable pipeline test: if test.wav is present in our own files dir,
-        // play it end-to-end instead of the tone
-        val testFile = java.io.File(getExternalFilesDir(null), "test.wav")
-
-        // one-tap test: ask for USB permission, then play a tone through raw usbfs
-        usbManager.deviceList.values.firstOrNull { d ->
-            (0 until d.interfaceCount).any {
-                d.getInterface(it).interfaceClass == android.hardware.usb.UsbConstants.USB_CLASS_AUDIO
-            }
-        }?.let { d ->
-            chosenDevice = d
-            withPermission(d) {
-                playing = true
-                if (testFile.exists()) {
-                    Log.i("VCProbe", "playing test file ${testFile.absolutePath}")
-                    status = "raw usbfs file"
-                    player.start(d, android.net.Uri.fromFile(testFile), rate, bits, volume)
-                } else {
-                    Log.i("VCProbe", "starting raw usbfs tone on ${d.deviceName}")
-                    status = "raw usbfs tone"
-                    player.startTone(d, rate, bits, volume, 5)
-                }
-            }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 7)
         }
-
-        player.onInfo = { status = it }
-        player.onError = { status = "error: $it" }
-        player.onFinished = { playing = false; if (status.startsWith("engine")) status = "finished" }
 
         setContent {
             MaterialTheme {
@@ -101,16 +95,15 @@ class MainActivity : ComponentActivity() {
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("USB Direct", style = MaterialTheme.typography.headlineSmall)
+                        Text("VCHiFiMP", style = MaterialTheme.typography.headlineSmall)
+                        Text("Direct USB output", style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(4.dp))
                         Text(status, style = MaterialTheme.typography.bodySmall)
 
-                        Button(onClick = { refreshDevices() }) { Text("Scan USB devices") }
-
-                        OutlinedButton(onClick = {
-                            val report = probeUsbAudio()
-                            Log.i("VCProbe", report)
-                            status = report
-                        }) { Text("Probe USB audio path") }
+                        OutlinedButton(
+                            onClick = { refreshDevices() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Scan USB devices") }
 
                         devices.forEach { d ->
                             OutlinedButton(
@@ -118,8 +111,8 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
-                                    "${d.productName ?: "device"}  " +
-                                    "%04x:%04x".format(d.vendorId, d.productId) +
+                                    (d.productName ?: "device") +
+                                    "   %04x:%04x".format(d.vendorId, d.productId) +
                                     if (d == chosenDevice) "   [selected]" else ""
                                 )
                             }
@@ -130,28 +123,24 @@ class MainActivity : ComponentActivity() {
                         ) { uri ->
                             if (uri != null) {
                                 contentResolver.takePersistableUriPermission(
-                                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
                                 chosenUri = uri
-                                status = "file: $uri"
+                                status = "file: ${uri.lastPathSegment}"
                             }
                         }
                         Button(onClick = { picker.launch(arrayOf("audio/*")) }) {
                             Text(if (chosenUri == null) "Pick audio file" else "Change file")
                         }
 
-                        Text("Sample rate")
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(44100, 48000, 96000).forEach { r ->
-                                FilterChip(selected = rate == r, onClick = { rate = r },
-                                    label = { Text("${r / 1000}") })
-                            }
-                        }
-
-                        Text("Bit depth")
+                        Text("Output depth")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf(16, 24).forEach { b ->
-                                FilterChip(selected = bits == b, onClick = { bits = b },
-                                    label = { Text("$b") })
+                                FilterChip(
+                                    selected = bits == b,
+                                    onClick = { bits = b },
+                                    label = { Text("$b-bit") }
+                                )
                             }
                         }
 
@@ -160,31 +149,20 @@ class MainActivity : ComponentActivity() {
                             value = volume,
                             onValueChange = {
                                 volume = it
-                                player.setVolume(it)
+                                service?.setVolume(it)
                             }
                         )
-
-                        OutlinedButton(onClick = {
-                            val d = chosenDevice ?: devices.firstOrNull()
-                            if (d == null) { status = "no USB device"; return@OutlinedButton }
-                            chosenDevice = d
-                            withPermission(d) {
-                                playing = true
-                                status = "tone: opening raw usbfs"
-                                player.startTone(d, rate, bits, volume, 5)
-                            }
-                        }) { Text("Test tone 5 s") }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Button(
                                 enabled = chosenDevice != null && chosenUri != null && !playing,
-                                onClick = { play() }
+                                onClick = { startPlayback() }
                             ) { Text("Play") }
 
                             OutlinedButton(
                                 enabled = playing,
                                 onClick = {
-                                    player.stop()
+                                    service?.stop()
                                     playing = false
                                     status = "stopped"
                                 }
@@ -197,8 +175,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshDevices() {
-        devices = usbManager.deviceList.values.toList()
-        status = "${devices.size} USB device(s) visible"
+        devices = usbManager.deviceList.values.filter { d ->
+            (0 until d.interfaceCount).any {
+                d.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_AUDIO
+            }
+        }
+        status = "${devices.size} USB audio device(s)"
     }
 
     private fun selectDevice(d: UsbDevice) {
@@ -207,10 +189,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun withPermission(d: UsbDevice, action: () -> Unit) {
-        if (usbManager.hasPermission(d)) {
-            action()
-            return
-        }
+        if (usbManager.hasPermission(d)) { action(); return }
         pendingAction = action
         usbManager.requestPermission(
             d,
@@ -221,50 +200,35 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /** Answers the one architectural question: does this device offer
-     *  MIX_BEHAVIOR_BIT_PERFECT, i.e. can we bypass AudioFlinger's mixer
-     *  without root? */
-    private fun probeUsbAudio(): String {
-        if (Build.VERSION.SDK_INT < 33) return "needs Android 13+"
-        val am = getSystemService(AudioManager::class.java) ?: return "no AudioManager"
-        val sb = StringBuilder()
-        val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        for (d in outs) {
-            if (d.type != AudioDeviceInfo.TYPE_USB_HEADSET &&
-                d.type != AudioDeviceInfo.TYPE_USB_DEVICE) continue
-            sb.append("USB id=${d.id} type=${d.type} name=${d.productName}\n")
-            sb.append("  rates=${d.sampleRates.joinToString(",")}\n")
-            sb.append("  encodings=${d.encodings.joinToString(",")}\n")
-            try {
-                val attrs = am.getSupportedMixerAttributes(d)
-                if (attrs.isEmpty()) sb.append("  mixer: none\n")
-                for (m in attrs) {
-                    val f = m.format
-                    sb.append("  mixer behavior=${m.mixerBehavior} " +
-                              "encoding=0x${f.encoding.toString(16)} " +
-                              "rate=${f.sampleRate} " +
-                              "mask=0x${f.channelMask.toString(16)}\n")
-                }
-            } catch (t: Throwable) {
-                sb.append("  mixer query failed: ${t.message}\n")
-            }
-        }
-        if (sb.isEmpty()) sb.append("no USB audio output found")
-        return sb.toString()
+    /** Test hook only, used by adb: --ez autoplay true */
+    private fun debugAutoPlay() {
+        val f = java.io.File(getExternalFilesDir(null), "test.wav")
+        if (!f.exists()) { status = "no test.wav"; return }
+        refreshDevices()
+        val d = devices.firstOrNull() ?: run { status = "no usb audio"; return }
+        chosenDevice = d
+        chosenUri = Uri.fromFile(f)
+        Log.i("VCProbe", "debug autoplay " + f.absolutePath)
+        startPlayback()
     }
 
-    private fun play() {
+    private fun startPlayback() {
         val d = chosenDevice ?: return
         val u = chosenUri ?: return
-        playing = true
-        status = "starting"
-        player.start(d, u, rate, bits, volume)
+        val svc = service
+        if (svc == null) { status = "service not bound yet"; return }
+        withPermission(d) {
+            playing = true
+            status = "playing"
+            Log.i("VCProbe", "service play ${u.lastPathSegment}")
+            svc.play(d, u, 48000, bits, volume, u.lastPathSegment ?: "track")
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(permissionReceiver)
-        player.stop()
+        runCatching { unregisterReceiver(permissionReceiver) }
+        runCatching { unbindService(connection) }
     }
 
     companion object {
