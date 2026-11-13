@@ -26,6 +26,7 @@ data class TransportState(
     val index: Int = -1,
     val title: String = "",
     val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
     val queueSize: Int = 0,
     val error: String? = null
 )
@@ -52,8 +53,9 @@ class PlaybackService : Service() {
     private var index = -1
     private var device: UsbDevice? = null
     private var pausedAtMs = 0L
-    private var volume = 0.6f
+    private var volume = 0.2f
     private var bits = 24
+    @Volatile private var suppressFinish = false
 
     inner class LocalBinder : Binder() {
         fun service(): PlaybackService = this@PlaybackService
@@ -65,7 +67,9 @@ class PlaybackService : Service() {
             onInfo = { Log.i("VCProbe", "player: $it") }
             onProgress = { ms -> _state.value = _state.value.copy(positionMs = ms) }
             onFinished = {
-                if (_state.value.playing) advanceOrStop()
+                // A deliberate pause/stop also ends the decode loop. Without this
+                // guard the service read that as end-of-track and skipped ahead.
+                if (!suppressFinish && _state.value.playing) advanceOrStop()
             }
             onError = { msg ->
                 Log.e("VCProbe", "player error: $msg")
@@ -124,7 +128,7 @@ class PlaybackService : Service() {
         pausedAtMs = fromMs
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
-            positionMs = fromMs, error = null
+            positionMs = fromMs, durationMs = t.durationMs, error = null
         )
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
@@ -136,8 +140,10 @@ class PlaybackService : Service() {
     fun pause() {
         if (!_state.value.playing) return
         pausedAtMs = _state.value.positionMs
-        player.stop()
+        suppressFinish = true
         _state.value = _state.value.copy(playing = false, paused = true)
+        player.stop()
+        suppressFinish = false
         publish(PlaybackState.STATE_PAUSED)
         // keep the notification: dropping the foreground state made the whole
         // thing disappear, which is not what a pause means
@@ -170,7 +176,9 @@ class PlaybackService : Service() {
     }
 
     fun stop() {
+        suppressFinish = true
         player.stop()
+        suppressFinish = false
         pausedAtMs = 0
         _state.value = _state.value.copy(playing = false, paused = false, positionMs = 0)
         publish(PlaybackState.STATE_STOPPED)

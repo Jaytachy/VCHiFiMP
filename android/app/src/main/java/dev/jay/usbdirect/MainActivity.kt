@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private var scanState by mutableStateOf("")
     private var scanning by mutableStateOf(false)
     private var usbState by mutableStateOf("no DAC")
+    private var volume by mutableStateOf(0.2f)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val svc = (binder as PlaybackService.LocalBinder).service()
             service = svc
+            svc.setVolume(volume)
             intent?.getStringExtra("debugfile")?.let { path ->
                 val f = java.io.File(path)
                 if (f.exists()) {
@@ -71,7 +73,7 @@ class MainActivity : ComponentActivity() {
                 val d = audioDevice()
                 if (d != null) {
                     if (usbManager.hasPermission(d)) {
-                        svc.setDevice(d, 24, 0.6f)
+                        svc.setDevice(d, 24, volume)
                         svc.setQueue(listOf(t), 0)
                     } else {
                         usbManager.requestPermission(
@@ -171,22 +173,38 @@ class MainActivity : ComponentActivity() {
             bottomBar = {
                 if (transport.title.isNotEmpty()) {
                     Surface(tonalElevation = 3.dp) {
-                        Row(
-                            Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        Column(
+                            Modifier.fillMaxWidth().navigationBarsPadding()
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
                         ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(transport.title, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis)
-                                Text(
-                                    "${transport.positionMs / 1000}s",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        transport.title, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        fmt(transport.positionMs) + " / " + fmt(transport.durationMs),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                TextButton(onClick = { service?.previous() }) { Text("|◀") }
+                                TextButton(onClick = {
+                                    if (transport.playing) service?.pause() else service?.resume()
+                                }) { Text(if (transport.playing) "Pause" else "Play") }
+                                TextButton(onClick = { service?.next() }) { Text("▶|") }
                             }
-                            TextButton(onClick = {
-                                if (transport.playing) service?.pause() else service?.resume()
-                            }) { Text(if (transport.playing) "Pause" else "Play") }
-                            TextButton(onClick = { service?.stop() }) { Text("Stop") }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("vol", style = MaterialTheme.typography.bodySmall)
+                                Slider(
+                                    value = volume,
+                                    onValueChange = { volume = it; service?.setVolume(it) },
+                                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                                )
+                                Text("${(volume * 100).toInt()}%",
+                                     style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
                 }
@@ -276,8 +294,14 @@ class MainActivity : ComponentActivity() {
 
     private fun startAlbum(a: LibAlbum, index: Int, d: UsbDevice) {
         val svc = service ?: return
-        svc.setDevice(d, 24, 0.6f)
+        svc.setDevice(d, 24, volume)
         svc.setQueue(a.tracks.map { it.toQueueTrack() }, index)
+    }
+
+    private fun fmt(ms: Long): String {
+        if (ms <= 0) return "-:--"
+        val t = ms / 1000
+        return "%d:%02d".format(t / 60, t % 60)
     }
 
     private fun audioDevice(): UsbDevice? =

@@ -289,6 +289,7 @@ class UsbDirectPlayer(private val context: Context) {
         private val progress: ((Long) -> Unit)?
     ) {
         private var lastReportMs = 0L
+        private var framesOut = 0L
         private val ratio = srcRate.toDouble() / outRate.toDouble()
         private val chunk = 4096
         private val direct: FloatBuffer =
@@ -364,6 +365,12 @@ class UsbDirectPlayer(private val context: Context) {
             direct.flip()
             eng.write(direct, frames)
             direct.clear()
+            framesOut += frames
+            val ms = startMs + framesOut * 1000L / outRate
+            if (ms - lastReportMs >= 250) {
+                lastReportMs = ms
+                progress?.invoke(ms)
+            }
         }
 
         fun flush() = flushChunk()
