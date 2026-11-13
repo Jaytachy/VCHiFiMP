@@ -81,6 +81,7 @@ struct uae {
 
     volatile int running;
     volatile int failed;
+    int started;
     pthread_t thread;
     char errmsg[160];
 };
@@ -370,6 +371,9 @@ struct uae *uae_open(int fd, int rate, int bits)
     struct uae *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->fd = fd;
+    pthread_mutex_init(&e->lock, NULL);
+    pthread_cond_init(&e->can_read, NULL);
+    pthread_cond_init(&e->can_write, NULL);
 
     unsigned char cfg[1024];
     int r = ctrl(fd, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
@@ -441,22 +445,21 @@ struct uae *uae_open(int fd, int rate, int bits)
     unsigned char fr[3] = { (unsigned char)(rate & 0xff),
                             (unsigned char)((rate >> 8) & 0xff),
                             (unsigned char)((rate >> 16) & 0xff) };
-    if (ctrl(fd, 0x22, 0x01, 0x0100, (uint16_t)e->ep, 3, fr) < 0)
-        set_err(e, "warning: sample rate control failed: %s", strerror(errno));
+    /* Not fatal: some devices ignore SET_CUR and derive the rate from the
+       alt setting. Keep going. */
+    (void)ctrl(fd, 0x22, 0x01, 0x0100, (uint16_t)e->ep, 3, fr);
 
     e->ring = malloc(sizeof(float) * RING_FRAMES * (size_t)e->channels);
     if (!e->ring) { set_err(e, "ring alloc failed"); return e; }
-
-    pthread_mutex_init(&e->lock, NULL);
-    pthread_cond_init(&e->can_read, NULL);
-    pthread_cond_init(&e->can_write, NULL);
 
     e->running = 1;
     if (pthread_create(&e->thread, NULL, pump, e) != 0) {
         set_err(e, "pthread_create failed");
         e->running = 0;
+        e->started = 0;
         return e;
     }
+    e->started = 1;
     return e;
 }
 
@@ -512,7 +515,7 @@ void uae_close(struct uae *e)
     pthread_cond_broadcast(&e->can_read);
     pthread_cond_broadcast(&e->can_write);
     pthread_mutex_unlock(&e->lock);
-    pthread_join(e->thread, NULL);
+    if (e->started) pthread_join(e->thread, NULL);
 
     unsigned int iface = (unsigned)e->iface;
     ioctl(e->fd, USBDEVFS_RELEASEINTERFACE, &iface);
