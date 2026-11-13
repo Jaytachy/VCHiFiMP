@@ -55,6 +55,7 @@ class PlaybackService : Service() {
     private var pausedAtMs = 0L
     private var volume = 0.2f
     private var bits = 24
+    private var exclusive = true
     @Volatile private var suppressFinish = false
 
     inner class LocalBinder : Binder() {
@@ -132,7 +133,7 @@ class PlaybackService : Service() {
         )
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
-        player.start(d, t.uri, 48000, bits, volume, fromMs)
+        player.start(d, t.uri, 48000, bits, volume, fromMs, useMixer = !exclusive)
     }
 
     fun play() = if (index >= 0) playAt(index, pausedAtMs) else Unit
@@ -184,6 +185,9 @@ class PlaybackService : Service() {
         publish(PlaybackState.STATE_STOPPED)
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
+
+    /** true = take the device over (bit-perfect). false = Android's mixer. */
+    fun setExclusive(on: Boolean) { exclusive = on }
 
     fun setVolume(v: Float) {
         volume = v.coerceIn(0f, 1f)

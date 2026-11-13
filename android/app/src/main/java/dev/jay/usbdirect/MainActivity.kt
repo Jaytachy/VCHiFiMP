@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private var scanning by mutableStateOf(false)
     private var usbState by mutableStateOf("no DAC")
     private var volume by mutableStateOf(0.2f)
+    private var exclusive by mutableStateOf(true)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
@@ -59,6 +60,7 @@ class MainActivity : ComponentActivity() {
             val svc = (binder as PlaybackService.LocalBinder).service()
             service = svc
             svc.setVolume(volume)
+            svc.setExclusive(exclusive)
             intent?.getStringExtra("debugfile")?.let { path ->
                 val f = java.io.File(path)
                 if (f.exists()) {
@@ -113,6 +115,10 @@ class MainActivity : ComponentActivity() {
         registerReceiver(permissionReceiver, IntentFilter(ACTION_USB_PERMISSION), flags)
 
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
+
+        volume = getPreferences(MODE_PRIVATE).getFloat("volume", 0.2f)
+        exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
+        if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
         if (savedTree != null) {
@@ -199,7 +205,12 @@ class MainActivity : ComponentActivity() {
                                 Text("vol", style = MaterialTheme.typography.bodySmall)
                                 Slider(
                                     value = volume,
-                                    onValueChange = { volume = it; service?.setVolume(it) },
+                                    onValueChange = {
+                                        volume = it
+                                        service?.setVolume(it)
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putFloat("volume", it).apply()
+                                    },
                                     modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
                                 )
                                 Text("${(volume * 100).toInt()}%",
@@ -222,6 +233,26 @@ class MainActivity : ComponentActivity() {
                             onClick = { getPreferences(MODE_PRIVATE)
                                 .getString("tree", null)?.let { scan(Uri.parse(it)) } }
                         ) { Text("Rescan") }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Exclusive DAC", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (exclusive) "bit-perfect, this app owns the device"
+                                else "Android mixer, other apps can play",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Switch(
+                            checked = exclusive,
+                            onCheckedChange = {
+                                exclusive = it
+                                service?.setExclusive(it)
+                                getPreferences(MODE_PRIVATE).edit()
+                                    .putBoolean("exclusive", it).apply()
+                            }
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                 }

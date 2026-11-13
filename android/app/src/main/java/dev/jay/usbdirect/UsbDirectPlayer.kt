@@ -4,6 +4,11 @@ import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -32,6 +37,7 @@ class UsbDirectPlayer(private val context: Context) {
     var onInfo: ((String) -> Unit)? = null
     var onProgress: ((positionMs: Long) -> Unit)? = null
 
+    @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
     private var thread: Thread? = null
     private var connection: UsbDeviceConnection? = null
@@ -40,14 +46,71 @@ class UsbDirectPlayer(private val context: Context) {
     val isRunning: Boolean get() = running
 
     fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float,
-              startMs: Long = 0L) {
+              startMs: Long = 0L, useMixer: Boolean = false) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
         Log.i("VCProbe", "source=" + src + " Hz -> device=" + dev + " Hz" +
                 if (src == dev) " (bit-perfect path, no resample)" else " (resampled)")
-        startInternal(device, dev, bits, volume) { eng -> decodeLoop(uri, eng, dev, startMs) }
+        if (useMixer) {
+            startMixer(device, uri, dev, volume, startMs)
+        } else {
+            startInternal(device, dev, bits, volume) { eng ->
+                decodeLoop(uri, UsbTarget(eng), dev, startMs)
+            }
+        }
+    }
+
+    /**
+     * Fallback path: let Android's mixer own the DAC. Not bit-perfect and the
+     * rate is whatever the HAL picks, but it mixes with other apps and needs no
+     * exclusive access.
+     */
+    private fun startMixer(device: UsbDevice, uri: Uri, rate: Int, volume: Float, startMs: Long) {
+        stop()
+        mixerVolume = volume
+        running = true
+        thread = Thread {
+            var track: AudioTrack? = null
+            try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val dev = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_USB_DEVICE
+                } ?: throw IllegalStateException("no USB audio device for mixer path")
+
+                val fmt = AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setSampleRate(rate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build()
+                track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setAudioFormat(fmt)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setBufferSizeInBytes(rate / 10 * 8)
+                    .build()
+                track.setPreferredDevice(dev)
+                track.play()
+                Log.i("VCProbe", "mixer sink open: " + rate + " Hz")
+                onInfo?.invoke("mixer: ${rate} Hz")
+                decodeLoop(uri, MixerTarget(track) { mixerVolume }, rate, startMs)
+            } catch (t: Throwable) {
+                Log.e("VCProbe", "mixer failed: ${t.message}", t)
+                if (running) onError?.invoke(t.message ?: t.toString())
+            } finally {
+                runCatching { track?.stop() }
+                runCatching { track?.release() }
+                running = false
+                onFinished?.invoke()
+            }
+        }.also { it.isDaemon = true; it.start() }
     }
 
     private fun probeRate(uri: Uri): Int {
@@ -126,7 +189,10 @@ class UsbDirectPlayer(private val context: Context) {
         thread = null
     }
 
-    fun setVolume(v: Float) { engine?.setVolume(v) }
+    fun setVolume(v: Float) {
+        mixerVolume = v
+        engine?.setVolume(v)
+    }
     fun setPpm(ppm: Float) { engine?.setPpm(ppm) }
 
     private fun playTone(eng: UsbAudioEngine, rate: Int, seconds: Int) {
@@ -155,7 +221,7 @@ class UsbDirectPlayer(private val context: Context) {
 
     // ------------------------------------------------------------- decoding
 
-    private fun decodeLoop(uri: Uri, eng: UsbAudioEngine, outRate: Int, startMs: Long) {
+    private fun decodeLoop(uri: Uri, target: PcmTarget, outRate: Int, startMs: Long) {
         val extractor = MediaExtractor()
         if (uri.scheme == "file") {
             extractor.setDataSource(uri.path!!)
@@ -185,7 +251,7 @@ class UsbDirectPlayer(private val context: Context) {
             extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
             Log.i("VCProbe", "seek to " + startMs + " ms (sampleTime=" + extractor.sampleTime + ")")
         }
-        val sink = PcmSink(eng, srcRate, outRate, srcCh, startMs, onProgress)
+        val sink = PcmSink(target, srcRate, outRate, srcCh, startMs, onProgress)
 
         if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
             decodeRaw(extractor, sink, format)
@@ -193,7 +259,7 @@ class UsbDirectPlayer(private val context: Context) {
             decodeCodec(extractor, format, track, sink)
         }
         sink.flush()
-        eng.eos()
+        target.eos()
         extractor.release()
         Log.i("VCProbe", "decode loop finished")
     }
@@ -280,8 +346,36 @@ class UsbDirectPlayer(private val context: Context) {
      * interpolated. v1 quality: fine for equal rates, adequate otherwise.
      * TODO: swap in libsamplerate for arbitrary ratios.
      */
+    private interface PcmTarget {
+        fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int): Int
+        fun eos()
+    }
+
+    private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
+        override fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int) =
+            eng.write(buf, frames)
+        override fun eos() = eng.eos()
+    }
+
+    private class MixerTarget(
+        private val track: AudioTrack,
+        private val volumeProvider: () -> Float
+    ) : PcmTarget {
+        override fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int): Int {
+            val v = volumeProvider()
+            if (v < 0.999f) {
+                val lim = buf.limit()
+                for (i in 0 until lim) buf.put(i, buf.get(i) * v)
+            }
+            bytes.position(0)
+            bytes.limit(frames * 8)          // 2 ch * 4 bytes
+            return track.write(bytes, frames * 8, AudioTrack.WRITE_BLOCKING)
+        }
+        override fun eos() { /* nothing queued to flush */ }
+    }
+
     private class PcmSink(
-        private val eng: UsbAudioEngine,
+        private val target: PcmTarget,
         private val srcRate: Int,
         private val outRate: Int,
         private val srcCh: Int,
@@ -292,9 +386,9 @@ class UsbDirectPlayer(private val context: Context) {
         private var framesOut = 0L
         private val ratio = srcRate.toDouble() / outRate.toDouble()
         private val chunk = 4096
-        private val direct: FloatBuffer =
-            ByteBuffer.allocateDirect(chunk * 2 * 4)
-                .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        private val directBytes: ByteBuffer =
+            ByteBuffer.allocateDirect(chunk * 2 * 4).order(ByteOrder.nativeOrder())
+        private val direct: FloatBuffer = directBytes.asFloatBuffer()
 
         private var t = 0.0
         private var prevL = 0f
@@ -363,7 +457,9 @@ class UsbDirectPlayer(private val context: Context) {
             val frames = direct.position() / 2
             if (frames == 0) return
             direct.flip()
-            eng.write(direct, frames)
+            directBytes.position(0)
+            directBytes.limit(frames * 8)
+            target.write(direct, directBytes, frames)
             direct.clear()
             framesOut += frames
             val ms = startMs + framesOut * 1000L / outRate
