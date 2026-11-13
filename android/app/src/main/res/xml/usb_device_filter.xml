@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Jieli 3654:4a55 (UAC1, 44.1/48/96k, S16 + S24_3LE) -->
+    <usb-device vendor-id="13892" product-id="19029" />
+    <!-- AB13X 0020:0b21 (known-bad test dongle) -->
+    <usb-device vendor-id="32" product-id="2849" />
+</resources>

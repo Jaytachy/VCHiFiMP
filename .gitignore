@@ -1,0 +1,6 @@
+tests/*.wav
+*.o
+*.so
+android/.gradle/
+android/build/
+android/app/build/
