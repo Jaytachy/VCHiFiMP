@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -139,6 +140,7 @@ class MainActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize()) {
                     val album = openAlbum
                     if (album != null) {
+                        BackHandler { openAlbum = null }
                         AlbumScreen(album) { openAlbum = null }
                     } else {
                         LibraryScreen()
@@ -184,24 +186,43 @@ class MainActivity : ComponentActivity() {
                                 .padding(horizontal = 12.dp, vertical = 4.dp)
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        transport.title, maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
-                                    Text(
-                                        fmt(transport.positionMs) + " / " + fmt(transport.durationMs),
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
+                                Text(
+                                    transport.title, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    fmt(transport.positionMs) + " / " + fmt(transport.durationMs),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // timeline: drag to seek, commits only on release so a
+                            // seek does not reopen the DAC on every pixel
+                            var dragging by remember { mutableStateOf(false) }
+                            var dragPos by remember { mutableStateOf(0f) }
+                            val dur = transport.durationMs.coerceAtLeast(1L)
+                            Slider(
+                                value = (if (dragging) dragPos
+                                         else transport.positionMs.toFloat())
+                                    .coerceIn(0f, dur.toFloat()),
+                                valueRange = 0f..dur.toFloat(),
+                                onValueChange = { dragging = true; dragPos = it },
+                                onValueChangeFinished = {
+                                    dragging = false
+                                    service?.seekTo(dragPos.toLong())
+                                },
+                                modifier = Modifier.fillMaxWidth().height(28.dp)
+                            )
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 TextButton(onClick = { service?.previous() }) { Text("|◀") }
                                 TextButton(onClick = {
                                     if (transport.playing) service?.pause() else service?.resume()
                                 }) { Text(if (transport.playing) "Pause" else "Play") }
                                 TextButton(onClick = { service?.next() }) { Text("▶|") }
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Spacer(Modifier.width(8.dp))
                                 Text("vol", style = MaterialTheme.typography.bodySmall)
                                 Slider(
                                     value = volume,

@@ -120,3 +120,25 @@ gcc -O2 -D_GNU_SOURCE -o usbplay usbplay.c \
 ```
 
 Android: open `android/` in Android Studio and build. Requires NDK and CMake.
+
+## Known issues
+
+- **Mixer mode is silent.** Root cause confirmed on device: after a raw session
+  the app re-issues `SETCONFIGURATION` to hand the device back, but that
+  sometimes fails with `EBADF` because the usbfs fd is invalidated by the
+  reconfiguration. `snd-usb-audio` then stays unbound and there is no ALSA card
+  for `AudioTrack` to route to. Symptom: mixer mode opens its sink, position
+  stays at 0:00, no sound. Workaround: replug the DAC. Proper fix: detect the
+  unbound state and refuse mixer playback with a clear message, or rebind
+  another way.
+- Pause resumes from the position at the moment of the tap, which can be a few
+  hundred ms behind the audio actually heard (buffer in flight).
+- Cached library keeps URIs for files deleted outside the app; playing one
+  fails silently.
+
+## Next
+
+- Library/Now Playing UI overhaul (album art, better hierarchy).
+- Glitch-free rate switching between tracks of different rates.
+- Vendor `libsamplerate` for 88.2/192 kHz sources.
+- Release signing.
