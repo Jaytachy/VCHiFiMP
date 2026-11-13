@@ -30,6 +30,7 @@ class UsbDirectPlayer(private val context: Context) {
     var onError: ((String) -> Unit)? = null
     var onFinished: (() -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
+    var onProgress: ((positionMs: Long) -> Unit)? = null
 
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -38,14 +39,15 @@ class UsbDirectPlayer(private val context: Context) {
 
     val isRunning: Boolean get() = running
 
-    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float) {
+    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float,
+              startMs: Long = 0L) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
         Log.i("VCProbe", "source=" + src + " Hz -> device=" + dev + " Hz" +
                 if (src == dev) " (bit-perfect path, no resample)" else " (resampled)")
-        startInternal(device, dev, bits, volume) { eng -> decodeLoop(uri, eng, dev) }
+        startInternal(device, dev, bits, volume) { eng -> decodeLoop(uri, eng, dev, startMs) }
     }
 
     private fun probeRate(uri: Uri): Int {
@@ -153,7 +155,7 @@ class UsbDirectPlayer(private val context: Context) {
 
     // ------------------------------------------------------------- decoding
 
-    private fun decodeLoop(uri: Uri, eng: UsbAudioEngine, outRate: Int) {
+    private fun decodeLoop(uri: Uri, eng: UsbAudioEngine, outRate: Int, startMs: Long) {
         val extractor = MediaExtractor()
         if (uri.scheme == "file") {
             extractor.setDataSource(uri.path!!)
@@ -179,7 +181,11 @@ class UsbDirectPlayer(private val context: Context) {
         onInfo?.invoke("$mime  $srcRate Hz  ${srcCh}ch  ->  $outRate Hz")
 
         Log.i("VCProbe", "track mime=" + mime + " rate=" + srcRate + " ch=" + srcCh)
-        val sink = PcmSink(eng, srcRate, outRate, srcCh)
+        if (startMs > 0) {
+            extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+            Log.i("VCProbe", "seek to " + startMs + " ms (sampleTime=" + extractor.sampleTime + ")")
+        }
+        val sink = PcmSink(eng, srcRate, outRate, srcCh, startMs, onProgress)
 
         if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
             decodeRaw(extractor, sink, format)
@@ -277,8 +283,11 @@ class UsbDirectPlayer(private val context: Context) {
         private val eng: UsbAudioEngine,
         private val srcRate: Int,
         private val outRate: Int,
-        private val srcCh: Int
+        private val srcCh: Int,
+        private val startMs: Long,
+        private val progress: ((Long) -> Unit)?
     ) {
+        private var lastReportMs = 0L
         private val ratio = srcRate.toDouble() / outRate.toDouble()
         private val chunk = 4096
         private val direct: FloatBuffer =

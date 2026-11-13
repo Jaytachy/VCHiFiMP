@@ -87,6 +87,9 @@ struct uae {
 
     float volume;
     double ppm;
+    uint64_t rendered;      /* frames packed since open */
+    float gain;             /* fade in/out state */
+    int ending;             /* source ran dry: fade out and stay silent */
     unsigned cfgval;
     int ctrl_iface;
 
@@ -225,9 +228,22 @@ static size_t ring_read(struct uae *e, float *dst, size_t frames)
 static void pack_frames(struct uae *e, unsigned char *dst, const float *src, int n)
 {
     const int ss = e->bpf / e->channels;   /* subframe bytes */
+    const float fade_len = (float)(e->rate / 50);   /* 20 ms */
+    const float step = 1.0f / fade_len;
     for (int f = 0; f < n; f++) {
+        /* 20 ms fade in on open and fade out when the source ends: an abrupt
+         * jump to/from full scale is a click, and USB DACs do not hide it. */
+        if (!e->ending) {
+            float g = (float)e->rendered / fade_len;
+            e->gain = g < 1.0f ? g : 1.0f;
+        } else {
+            e->gain -= step;
+            if (e->gain < 0.0f) e->gain = 0.0f;
+        }
+        const float gain = e->gain;
+        e->rendered++;
         for (int c = 0; c < e->channels; c++) {
-            float v = src[f * e->channels + c] * e->volume;
+            float v = src[f * e->channels + c] * e->volume * gain;
             unsigned char *p = dst + (f * e->channels + c) * ss;
             if (ss == 2) {
                 double d = v + (frand() - frand()) / 32768.0;
@@ -287,9 +303,11 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
             pthread_mutex_unlock(&e->lock);
         }
 
-        if (got < (size_t)n)
+        if (got < (size_t)n) {
             memset(tmp + got * e->channels, 0,
                    sizeof(float) * (size_t)(n - got) * e->channels);
+            if (got == 0) e->ending = 1;      /* nothing left: fade out */
+        }
 
         pack_frames(e, c->buf + off, tmp, n);
         c->pkt[k].length = (unsigned int)(n * e->bpf);
@@ -433,6 +451,9 @@ struct uae *uae_open(int fd, int rate, int bits)
     e->bpf     = pick->channels * pick->subframe;
     e->volume  = 1.0f;
     e->ppm     = 0.0;
+    e->gain    = 0.0f;
+    e->rendered = 0;
+    e->ending  = 0;
 
     /* Android keeps snd-usb-audio bound to the DAC. claimInterface(force=true)
      * evicts it but then claims the interface for us, after which the kernel's
