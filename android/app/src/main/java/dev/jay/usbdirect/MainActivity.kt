@@ -113,7 +113,18 @@ class MainActivity : ComponentActivity() {
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
 
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
-        if (savedTree != null) scan(Uri.parse(savedTree))
+        if (savedTree != null) {
+            val tree = Uri.parse(savedTree)
+            val cached = LibraryStore.load(this, tree)
+            if (cached != null) {
+                // launch is instant: show the cached library, rescan only on demand
+                tracks = cached
+                albums = LibraryScanner.albums(cached)
+                scanState = "${cached.size} tracks, ${albums.size} albums"
+            } else {
+                scan(tree)
+            }
+        }
 
         setContent {
             MaterialTheme {
@@ -151,7 +162,7 @@ class MainActivity : ComponentActivity() {
                     Text("VCHiFiMP", style = MaterialTheme.typography.headlineSmall)
                     Text(
                         if (transport.playing) "playing  ${transport.title}"
-                        else if (scanning) scanState else usbState,
+                        else scanState.ifEmpty { usbState },
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1, overflow = TextOverflow.Ellipsis
                     )
@@ -292,6 +303,7 @@ class MainActivity : ComponentActivity() {
                 },
                 cancel = cancelScan
             )
+            LibraryStore.save(this, tree, found)
             runOnUiThread {
                 if (gen != scanGen) return@runOnUiThread
                 tracks = found
