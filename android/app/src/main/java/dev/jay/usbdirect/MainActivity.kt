@@ -62,6 +62,10 @@ class MainActivity : ComponentActivity() {
         // run the audio-path probe on launch so it lands in logcat unattended
         runCatching { Log.i("VCProbe", probeUsbAudio()) }
 
+        // scriptable pipeline test: if test.wav is present in our own files dir,
+        // play it end-to-end instead of the tone
+        val testFile = java.io.File(getExternalFilesDir(null), "test.wav")
+
         // one-tap test: ask for USB permission, then play a tone through raw usbfs
         usbManager.deviceList.values.firstOrNull { d ->
             (0 until d.interfaceCount).any {
@@ -70,10 +74,16 @@ class MainActivity : ComponentActivity() {
         }?.let { d ->
             chosenDevice = d
             withPermission(d) {
-                Log.i("VCProbe", "starting raw usbfs tone on ${d.deviceName}")
                 playing = true
-                status = "raw usbfs tone"
-                player.startTone(d, rate, bits, volume, 5)
+                if (testFile.exists()) {
+                    Log.i("VCProbe", "playing test file ${testFile.absolutePath}")
+                    status = "raw usbfs file"
+                    player.start(d, android.net.Uri.fromFile(testFile), rate, bits, volume)
+                } else {
+                    Log.i("VCProbe", "starting raw usbfs tone on ${d.deviceName}")
+                    status = "raw usbfs tone"
+                    player.startTone(d, rate, bits, volume, 5)
+                }
             }
         }
 

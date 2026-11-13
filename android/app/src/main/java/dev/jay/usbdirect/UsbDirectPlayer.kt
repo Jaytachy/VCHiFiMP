@@ -62,6 +62,7 @@ class UsbDirectPlayer(private val context: Context) {
                 engine = eng
                 eng.setVolume(volume)
 
+                Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
                 onInfo?.invoke("engine: ${rate} Hz / $bits-bit")
                 body(eng)
             } catch (t: Throwable) {
@@ -111,6 +112,8 @@ class UsbDirectPlayer(private val context: Context) {
             buf.flip()
             if (eng.write(buf, chunk) < 0) break
             written += chunk
+            if (written % (rate.toLong() * 2) == 0L)
+                Log.i("VCProbe", "tone: ${written / rate} s written")
         }
     }
 
@@ -118,8 +121,12 @@ class UsbDirectPlayer(private val context: Context) {
 
     private fun decodeLoop(uri: Uri, eng: UsbAudioEngine, outRate: Int) {
         val extractor = MediaExtractor()
-        context.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
-            extractor.setDataSource(pfd.fileDescriptor)
+        if (uri.scheme == "file") {
+            extractor.setDataSource(uri.path!!)
+        } else {
+            context.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
+                extractor.setDataSource(pfd.fileDescriptor)
+            }
         }
 
         var track = -1
@@ -137,6 +144,7 @@ class UsbDirectPlayer(private val context: Context) {
         val srcCh = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
         onInfo?.invoke("$mime  $srcRate Hz  ${srcCh}ch  ->  $outRate Hz")
 
+        Log.i("VCProbe", "track mime=" + mime + " rate=" + srcRate + " ch=" + srcCh)
         val sink = PcmSink(eng, srcRate, outRate, srcCh)
 
         if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
@@ -146,6 +154,7 @@ class UsbDirectPlayer(private val context: Context) {
         }
         sink.flush()
         extractor.release()
+        Log.i("VCProbe", "decode loop finished")
     }
 
     private fun decodeRaw(extractor: MediaExtractor, sink: PcmSink, format: MediaFormat) {
@@ -153,10 +162,15 @@ class UsbDirectPlayer(private val context: Context) {
             format.getInteger(MediaFormat.KEY_PCM_ENCODING) else 2 /* PCM_16BIT */
 
         val buf = ByteBuffer.allocateDirect(1 shl 16).order(ByteOrder.nativeOrder())
+        var reads = 0
+        var total = 0L
         while (running) {
             buf.clear()
             val n = extractor.readSampleData(buf, 0)
-            if (n < 0) break
+            if (n < 0) { Log.i("VCProbe", "raw EOF after " + reads + " reads, " + total + " bytes"); break }
+            reads++
+            total += n
+            if (reads % 50 == 0) Log.i("VCProbe", "raw reads=" + reads + " bytes=" + total + " enc=" + pcmEncoding)
             buf.position(0); buf.limit(n)
             if (pcmEncoding == 4) {          // PCM_FLOAT
                 val fb = buf.asFloatBuffer()

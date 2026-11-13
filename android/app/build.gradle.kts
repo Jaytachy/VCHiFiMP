@@ -49,4 +49,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // force the 16 KB-page-aligned build (older versions fail ELF alignment checks)
+    implementation("androidx.graphics:graphics-path:1.1.0")
 }

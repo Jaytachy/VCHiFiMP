@@ -26,6 +26,15 @@
 
 #include "usb_audio_engine.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VCProbe", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VCProbe", __VA_ARGS__)
+#else
+#define LOGI(...) do {} while (0)
+#define LOGE(...) do {} while (0)
+#endif
+
 #ifndef USBDEVFS_DISCONNECT_CLAIM
 #define USBDEVFS_DISCONNECT_CLAIM _IOWR('U', 0x17, struct usbdevfs_disconnect_claim)
 #define USBDEVFS_DISCONNECT_CLAIM_IF_DRIVER 0x01
@@ -319,6 +328,8 @@ static void *pump(void *arg)
     for (int i = 0; i < NURB; i++) {
         fill_urb(e, &ctx[i], &acc, &prev, max_frames, fpm, 0);
         if (ioctl(e->fd, USBDEVFS_SUBMITURB, &ctx[i].urb) < 0) {
+            LOGE("uae: SUBMITURB prime %d failed: %s (len=%u)",
+                 i, strerror(errno), ctx[i].urb.buffer_length);
             set_err(e, "SUBMITURB: %s", strerror(errno));
             e->failed = 1;
             e->running = 0;
@@ -327,6 +338,7 @@ static void *pump(void *arg)
         ctx[i].submitted = 1;
     }
 
+    int reaped = 0;
     while (e->running) {
         struct usbdevfs_urb *u = NULL;
         if (ioctl(e->fd, USBDEVFS_REAPURBNDELAY, &u) < 0) {
@@ -337,6 +349,11 @@ static void *pump(void *arg)
         }
         struct urb_ctx *c = (struct urb_ctx *)u->usercontext;
         c->submitted = 0;
+        if ((++reaped % 500) == 0)
+            LOGI("uae: reaped=%d status=%d len=%u", reaped, u->status, u->actual_length);
+        if (u->status && reaped < 600)
+            LOGE("uae: urb status=%d packets0=%u/%u", u->status,
+                 c->pkt[0].actual_length, c->pkt[0].length);
 
         fill_urb(e, c, &acc, &prev, max_frames, fpm, 1);
 
@@ -434,8 +451,13 @@ struct uae *uae_open(int fd, int rate, int bits)
         }
         i += len;
     }
-    if (swept == 0)
-        set_err(e, "could not release kernel drivers from any interface");
+    /* swept == 0 just means nothing is bound right now (a previous session
+     * already detached the driver, or the device never bound one). Not fatal:
+     * claiming below is the real test. */
+    (void)swept;
+
+    LOGI("uae: iface=%d alt=%d ep=0x%02x maxpkt=%d bpf=%d swept=%d",
+         e->iface, e->alt, e->ep, e->maxpkt, e->bpf, swept);
 
     unsigned int cfgval = (unsigned)cfg[5];
     if (ioctl(fd, USBDEVFS_SETCONFIGURATION, &cfgval) < 0 && errno != EBUSY) {
@@ -458,6 +480,7 @@ struct uae *uae_open(int fd, int rate, int bits)
 
     unsigned int iface = (unsigned)e->iface;
     if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &iface) < 0) {
+        LOGE("uae: CLAIMINTERFACE(%u) failed: %s", iface, strerror(errno));
         if (errno == EBUSY)
             set_err(e, "interface %d busy (snd-usb-audio bound; needs root)",
                     e->iface);
