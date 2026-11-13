@@ -90,6 +90,7 @@ struct uae {
     uint64_t rendered;      /* frames packed since open */
     float gain;             /* fade in/out state */
     int ending;             /* source ran dry: fade out and stay silent */
+    volatile int eos;       /* producer says: no more samples coming */
     unsigned cfgval;
     int ctrl_iface;
 
@@ -306,7 +307,10 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
         if (got < (size_t)n) {
             memset(tmp + got * e->channels, 0,
                    sizeof(float) * (size_t)(n - got) * e->channels);
-            if (got == 0) e->ending = 1;      /* nothing left: fade out */
+            /* Only fade out once the producer has declared end-of-stream.
+             * Inferring it from an empty ring faded playback to silence at
+             * startup, because the pump primes URBs before any data exists. */
+            if (e->eos) e->ending = 1;
         }
 
         pack_frames(e, c->buf + off, tmp, n);
@@ -594,6 +598,11 @@ void uae_set_volume(struct uae *e, float v)
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     e->volume = v;
+}
+
+void uae_set_eos(struct uae *e)
+{
+    if (e) e->eos = 1;
 }
 
 void uae_set_ppm(struct uae *e, float ppm)

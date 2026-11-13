@@ -72,6 +72,12 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetPpm(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeEos(JNIEnv *env, jobject thiz, jlong h)
+{
+    if (h) uae_set_eos((struct uae *)(intptr_t)h);
+}
+
+JNIEXPORT void JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeClose(JNIEnv *env, jobject thiz, jlong h)
 {
     if (h) uae_close((struct uae *)(intptr_t)h);

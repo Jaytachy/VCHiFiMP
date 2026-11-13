@@ -47,21 +47,25 @@ object LibraryScanner {
         cancel: AtomicBoolean = AtomicBoolean(false)
     ): List<LibTrack> {
         val out = ArrayList<LibTrack>()
-        walk(context, tree, out, onProgress, cancel)
+        try {
+            val rootId = DocumentsContract.getTreeDocumentId(tree)
+            walk(context, tree, rootId, out, onProgress, cancel)
+        } catch (t: Throwable) {
+            Log.e("VCProbe", "scan failed: ${t.message}", t)
+        }
         Log.i("VCProbe", "scan: ${out.size} tracks")
         return out
     }
 
     private fun walk(
         context: Context,
-        dir: Uri,
+        tree: Uri,
+        documentId: String,
         out: MutableList<LibTrack>,
         onProgress: (Int, String) -> Unit,
         cancel: AtomicBoolean
     ) {
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-            dir, DocumentsContract.getDocumentId(dir)
-        )
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId)
         val resolver = context.contentResolver
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -74,9 +78,9 @@ object LibraryScanner {
                 val id = c.getString(0)
                 val name = c.getString(1) ?: continue
                 val mime = c.getString(2) ?: ""
-                val child = DocumentsContract.buildDocumentUriUsingTree(dir, id)
+                val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    walk(context, child, out, onProgress, cancel)
+                    walk(context, tree, id, out, onProgress, cancel)
                 } else {
                     val ext = name.substringAfterLast('.', "").lowercase()
                     if (ext in AUDIO_EXT || mime.startsWith("audio/")) {
@@ -84,6 +88,8 @@ object LibraryScanner {
                         if (t != null) {
                             out.add(t)
                             onProgress(out.size, name)
+                            if (out.size % 25 == 0)
+                                Log.i("VCProbe", "scan: ${out.size} tracks, at $name")
                         }
                     }
                 }

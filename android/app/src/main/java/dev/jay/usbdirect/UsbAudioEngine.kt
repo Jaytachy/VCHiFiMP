@@ -28,6 +28,11 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetPpm(handle, ppm)
     }
 
+    /** Tell the engine the producer is done, so it can fade out cleanly. */
+    fun eos() {
+        if (handle != 0L) nativeEos(handle)
+    }
+
     override fun close() {
         val h = handle
         handle = 0L
@@ -39,6 +44,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeWrite(h: Long, buffer: FloatBuffer, frames: Int): Int
     private external fun nativeSetVolume(h: Long, v: Float)
     private external fun nativeSetPpm(h: Long, ppm: Float)
+    private external fun nativeEos(h: Long)
     private external fun nativeClose(h: Long)
 
     companion object {

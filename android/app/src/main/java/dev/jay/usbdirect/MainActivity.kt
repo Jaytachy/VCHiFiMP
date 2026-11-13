@@ -20,6 +20,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -46,14 +47,45 @@ class MainActivity : ComponentActivity() {
     private var usbState by mutableStateOf("no DAC")
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
+    private var pendingDebug: Track? = null
+    private var pendingDebugTrack: Track? = null
 
     private val cancelScan = AtomicBoolean(false)
+    private var scanGen = 0
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val svc = (binder as PlaybackService.LocalBinder).service()
             service = svc
+            intent?.getStringExtra("debugfile")?.let { path ->
+                val f = java.io.File(path)
+                if (f.exists()) {
+                    val info = MediaProbe.of(this@MainActivity, Uri.fromFile(f))
+                    pendingDebug = Track(Uri.fromFile(f),
+                        MediaProbe.titleOf(Uri.fromFile(f)), info?.durationMs ?: 0L)
+                }
+            }
             lifecycleScope.launch { svc.state.collect { transport = it } }
+            pendingDebug?.let { t ->
+                pendingDebug = null
+                val d = audioDevice()
+                if (d != null) {
+                    if (usbManager.hasPermission(d)) {
+                        svc.setDevice(d, 24, 0.6f)
+                        svc.setQueue(listOf(t), 0)
+                    } else {
+                        usbManager.requestPermission(
+                            d, PendingIntent.getBroadcast(
+                                this@MainActivity, 0,
+                                Intent(ACTION_USB_PERMISSION),
+                                PendingIntent.FLAG_IMMUTABLE
+                            )
+                        )
+                        pendingAlbum = null
+                        pendingDebugTrack = t
+                    }
+                }
+            }
         }
         override fun onServiceDisconnected(name: ComponentName?) { service = null }
     }
@@ -129,7 +161,7 @@ class MainActivity : ComponentActivity() {
                 if (transport.title.isNotEmpty()) {
                     Surface(tonalElevation = 3.dp) {
                         Row(
-                            Modifier.fillMaxWidth().padding(12.dp),
+                            Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
@@ -245,6 +277,10 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun scan(tree: Uri) {
+        // Only one scan at a time: a second one would race the first and both
+        // would publish partial libraries.
+        cancelScan.set(true)
+        val gen = ++scanGen
         cancelScan.set(false)
         scanning = true
         scanState = "scanning…"
@@ -257,6 +293,7 @@ class MainActivity : ComponentActivity() {
                 cancel = cancelScan
             )
             runOnUiThread {
+                if (gen != scanGen) return@runOnUiThread
                 tracks = found
                 albums = LibraryScanner.albums(found)
                 scanning = false

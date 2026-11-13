@@ -193,6 +193,7 @@ class UsbDirectPlayer(private val context: Context) {
             decodeCodec(extractor, format, track, sink)
         }
         sink.flush()
+        eng.eos()
         extractor.release()
         Log.i("VCProbe", "decode loop finished")
     }
