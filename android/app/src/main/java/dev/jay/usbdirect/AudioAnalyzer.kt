@@ -30,9 +30,12 @@ class AudioAnalyzer {
 
     companion object {
         const val BANDS = 64
-        private const val FFT_N = 2048
-        private const val RING = 1 shl 15
-        private const val TICK_MS = 16L
+        private const val FFT_N = 8192
+        private const val RING = 1 shl 16
+        private const val TICK_MS = 8L
+        // The meter uses a much shorter window than the FFT: an 8192-point
+        // window is 170 ms, which is far too slow to show a peak.
+        private const val METER_N = 2048
     }
 
     private val _frame = MutableStateFlow(
@@ -116,8 +119,8 @@ class AudioAnalyzer {
 
         var peak = 0f
         var sumsq = 0f
-        for (n in 0 until FFT_N) {
-            val v = ring[((w - FFT_N + n) and (RING - 1).toLong()).toInt()]
+        for (n in 0 until METER_N) {
+            val v = ring[((w - METER_N + n) and (RING - 1).toLong()).toInt()]
             val a = if (v < 0) -v else v
             if (a > peak) peak = a
             sumsq += v * v
@@ -136,12 +139,14 @@ class AudioAnalyzer {
             }
             val db = if (m <= 1e-7f) -100f else max(-100f, 20f * log10(m))
             // fast attack, slow release
-            smoothed[b] = if (db > smoothed[b]) db else smoothed[b] - (smoothed[b] - db) * 0.25f
+            // per-tick coefficients: ~120 updates/s now, so the release is
+            // shorter per frame to keep the same visible decay time
+            smoothed[b] = if (db > smoothed[b]) db else smoothed[b] - (smoothed[b] - db) * 0.13f
         }
 
         val peakDb = if (peak <= 1e-5f) -100f else 20f * log10(peak)
         val rmsDb = if (sumsq <= 1e-10f) -100f
-                    else 20f * log10(sqrt(sumsq / FFT_N))
+                    else 20f * log10(sqrt(sumsq / METER_N))
 
         val now = System.currentTimeMillis()
         if (peakDb > peakHold || now - lastPeakHoldTick > 1200) {
