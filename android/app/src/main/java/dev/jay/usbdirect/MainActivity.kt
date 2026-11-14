@@ -61,6 +61,7 @@ class MainActivity : ComponentActivity() {
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+
             val svc = (binder as PlaybackService.LocalBinder).service()
             service = svc
             svc.setVolume(volume)
@@ -74,6 +75,20 @@ class MainActivity : ComponentActivity() {
                     pendingDebug = Track(Uri.fromFile(f),
                         MediaProbe.titleOf(Uri.fromFile(f)), info?.durationMs ?: 0L)
                 }
+            }
+
+            if (intent?.getBooleanExtra("autoplayalbum", false) == true) {
+              android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                albums.maxByOrNull { it.tracks.size }?.let { a ->
+                    Log.i("VCProbe", "debug album: ${a.name} (${a.tracks.size} tracks)")
+                    playList(a.tracks, 0)
+                    if (intent.getBooleanExtra("shuffle", false)) {
+                        svc.setShuffle(true)
+                        Log.i("VCProbe", "debug shuffle on")
+                    }
+                    if (intent.getBooleanExtra("repeatone", false)) svc.setRepeat(RepeatMode.ONE)
+                }
+              }, 700)
             }
             pendingDebug?.let { t ->
                 pendingDebug = null
@@ -347,8 +362,9 @@ class MainActivity : ComponentActivity() {
     /* ---------------------------------------------------------- playback */
 
     private fun playList(list: List<LibTrack>, index: Int) {
-        if (list.isEmpty()) return
+        if (list.isEmpty()) { Log.i("VCProbe", "playList: empty"); return }
         val d = audioDevice()
+
         if (d == null) { dacName = "no USB DAC plugged in"; return }
         val q = list.map { it.toQueueTrack() }
         if (usbManager.hasPermission(d)) {

@@ -12,7 +12,9 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,6 +68,7 @@ class PlaybackService : Service() {
 
     private lateinit var session: MediaSession
 
+    private val main = Handler(Looper.getMainLooper())
     private val queue = mutableListOf<Track>()
     private val originalQueue = mutableListOf<Track>()
     private var shuffleEnabled = false
@@ -95,9 +98,13 @@ class PlaybackService : Service() {
                 )
             }
             onFinished = {
-                // A deliberate pause/stop also ends the decode loop. Without this
-                // guard the service read that as end-of-track and skipped ahead.
-                if (!suppressFinish && _state.value.playing) advanceOrStop()
+                // Advance on the main thread, never on the decode thread: the
+                // finish callback fires from inside the player's own thread, and
+                // starting the next track there meant stop() joined the calling
+                // thread and tore down the engine mid-transition.
+                main.post {
+                    if (!suppressFinish && _state.value.playing) advanceOrStop()
+                }
             }
             onError = { msg ->
                 Log.e("VCProbe", "player error: $msg")
@@ -105,6 +112,11 @@ class PlaybackService : Service() {
             }
         }
         session = MediaSession(this, "VCHiFiMP").apply {
+            // without these flags hardware media keys never reach the session
+            setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() = resume()
                 override fun onPause() = pause()

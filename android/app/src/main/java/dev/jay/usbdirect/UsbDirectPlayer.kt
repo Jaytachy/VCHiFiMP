@@ -40,6 +40,7 @@ class UsbDirectPlayer(private val context: Context) {
 
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
+    @Volatile private var session = 0
     private var thread: Thread? = null
     private var connection: UsbDeviceConnection? = null
     private var engine: UsbAudioEngine? = null
@@ -74,6 +75,7 @@ class UsbDirectPlayer(private val context: Context) {
      */
     private fun startMixer(device: UsbDevice, uri: Uri, rate: Int, volume: Float, startMs: Long) {
         stop()
+        val gen = ++session
         mixerVolume = volume
         running = true
         thread = Thread {
@@ -114,7 +116,7 @@ class UsbDirectPlayer(private val context: Context) {
                 runCatching { track?.stop() }
                 runCatching { track?.release() }
                 running = false
-                onFinished?.invoke()
+                if (gen == session) onFinished?.invoke()
             }
         }.also { it.isDaemon = true; it.start() }
     }
@@ -148,6 +150,7 @@ class UsbDirectPlayer(private val context: Context) {
     private fun startInternal(device: UsbDevice, rate: Int, bits: Int, volume: Float,
                               body: (UsbAudioEngine) -> Unit) {
         stop()
+        val gen = ++session
         running = true
         thread = Thread {
             var conn: UsbDeviceConnection? = null
@@ -180,21 +183,30 @@ class UsbDirectPlayer(private val context: Context) {
                 conn?.close()
                 connection = null
                 running = false
-                onFinished?.invoke()
+                // Only the session that is still current may report completion:
+                // a deliberate stop has already moved on, and letting the old
+                // thread fire onFinished made the service skip a track from
+                // inside the player's own stop().
+                if (gen == session) onFinished?.invoke()
             }
         }.also { it.isDaemon = true; it.start() }
     }
 
     fun stop() {
+        session++            // invalidate any in-flight completion callback
         analyzer.stop()
         running = false
         engine?.close()
         engine = null
         connection?.close()
         connection = null
-        thread?.interrupt()
-        try { thread?.join(1500) } catch (_: InterruptedException) { }
+
+        val t = thread
         thread = null
+        if (t != null && t !== Thread.currentThread()) {
+            t.interrupt()
+            try { t.join(1500) } catch (_: InterruptedException) { }
+        }
     }
 
     fun setVolume(v: Float) {

@@ -190,6 +190,27 @@ static int parse_config(const unsigned char *buf, int total,
     return n;
 }
 
+/* Detach the kernel audio driver from every audio-class interface. HID and
+ * vendor interfaces are left alone; they have no business being evicted. */
+static int sweep_audio(int fd, const unsigned char *cfg, int total)
+{
+    int n = 0;
+    for (int i = 0; i + 1 < total; ) {
+        int len = cfg[i], type = cfg[i + 1];
+        if (len < 2 || i + len > total) break;
+        if (type == USB_DT_INTERFACE && cfg[i + 5] == 0x01) {
+            struct usbdevfs_ioctl ctl;
+            memset(&ctl, 0, sizeof(ctl));
+            ctl.ifno = cfg[i + 2];
+            ctl.ioctl_code = USBDEVFS_DISCONNECT;
+            ctl.data = NULL;
+            if (ioctl(fd, USBDEVFS_IOCTL, &ctl) == 0) n++;
+        }
+        i += len;
+    }
+    return n;
+}
+
 static int alt_has_rate(const struct uae_alt *a, unsigned rate)
 {
     for (int k = 0; k < a->nrates; k++)
@@ -468,28 +489,14 @@ struct uae *uae_open(int fd, int rate, int bits)
      * an interface. So: disconnect every interface ourselves, claim nothing,
      * switch configuration, and claim only afterwards. USBDEVFS_DISCONNECT via
      * USBDEVFS_IOCTL needs no CAP_SYS_ADMIN, unlike USBDEVFS_DISCONNECT_CLAIM. */
-    int swept = 0;
     for (int i = 0; i + 1 < total; ) {
         int len = cfg[i], type = cfg[i + 1];
         if (len < 2 || i + len > total) break;
-        if (type == USB_DT_INTERFACE && e->nifaces < 16) {
+        if (type == USB_DT_INTERFACE && e->nifaces < 16)
             e->ifaces[e->nifaces++] = cfg[i + 2];
-        }
-        if (type == USB_DT_INTERFACE) {
-            /* Audio interfaces only: HID (inline remotes) is a different
-             * driver and has no reason to be evicted with us. */
-            int icls = cfg[i + 5];
-            if (icls == 0x01) {
-                struct usbdevfs_ioctl ctl;
-                memset(&ctl, 0, sizeof(ctl));
-                ctl.ifno = cfg[i + 2];
-                ctl.ioctl_code = USBDEVFS_DISCONNECT;
-                ctl.data = NULL;
-                if (ioctl(fd, USBDEVFS_IOCTL, &ctl) == 0) swept++;
-            }
-        }
         i += len;
     }
+    int swept = sweep_audio(fd, cfg, total);
     /* swept == 0 just means nothing is bound right now (a previous session
      * already detached the driver, or the device never bound one). Not fatal:
      * claiming below is the real test. */
@@ -520,7 +527,16 @@ struct uae *uae_open(int fd, int rate, int bits)
     }
 
     unsigned int iface = (unsigned)e->iface;
-    if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &iface) < 0) {
+    int claimed = 0;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &iface) == 0) { claimed = 1; break; }
+        if (errno != EBUSY) break;
+        /* The kernel may be re-probing snd-usb-audio after our teardown
+         * CONNECT. Sweep again and retry rather than failing the track. */
+        usleep(20000);
+        sweep_audio(fd, cfg, total);
+    }
+    if (!claimed) {
         LOGE("uae: CLAIMINTERFACE(%u) failed: %s", iface, strerror(errno));
         if (errno == EBUSY)
             set_err(e, "interface %d busy (snd-usb-audio bound; needs root)",
