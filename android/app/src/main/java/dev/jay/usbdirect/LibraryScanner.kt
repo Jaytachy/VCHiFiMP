@@ -15,9 +15,10 @@ data class LibTrack(
     val trackNo: Int,
     val durationMs: Long,
     val sampleRate: Int,
-    val bitDepth: Int = 0
+    val bitDepth: Int = 0,
+    val codec: String = ""
 ) {
-    fun toQueueTrack() = Track(uri, title, durationMs)
+    fun toQueueTrack() = Track(uri, title, durationMs, artist, album, codec)
 }
 
 data class LibAlbum(
@@ -118,13 +119,26 @@ object LibraryScanner {
                 // retriever does not always report these; leave 0 and let
                 // playback probe the real value
             }
-            LibTrack(uri, title, artist, album, trackNo, durMs, rate, bits)
+            val ext = filename.substringAfterLast('.', "").lowercase()
+            LibTrack(uri, title, artist, album, trackNo, durMs, rate, bits, codecName(ext))
         } catch (t: Throwable) {
             Log.w("VCProbe", "tag failed for $uri: ${t.message}")
             null
         } finally {
             runCatching { r.release() }
         }
+    }
+
+    private fun codecName(ext: String): String = when (ext) {
+        "flac" -> "FLAC"
+        "wav", "aiff", "aif" -> "PCM"
+        "mp3" -> "MP3"
+        "m4a", "alac" -> "ALAC"
+        "aac" -> "AAC"
+        "ogg" -> "OGG"
+        "opus" -> "OPUS"
+        "dsf", "dff" -> "DSD"
+        else -> ext.uppercase()
     }
 
     fun albums(tracks: List<LibTrack>): List<LibAlbum> =

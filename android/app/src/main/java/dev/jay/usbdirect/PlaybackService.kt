@@ -18,7 +18,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-data class Track(val uri: Uri, val title: String, val durationMs: Long = 0L)
+data class Track(
+    val uri: Uri,
+    val title: String,
+    val durationMs: Long = 0L,
+    val artist: String = "",
+    val album: String = "",
+    val codec: String = ""
+)
 
 data class TransportState(
     val playing: Boolean = false,
@@ -28,6 +35,9 @@ data class TransportState(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val format: String = "",
+    val artist: String = "",
+    val album: String = "",
+    val codec: String = "",
     val queueSize: Int = 0,
     val error: String? = null
 )
@@ -69,7 +79,11 @@ class PlaybackService : Service() {
             onInfo = { Log.i("VCProbe", "player: $it") }
             onProgress = { ms -> _state.value = _state.value.copy(positionMs = ms) }
             onFormat = { rate, bits ->
-                _state.value = _state.value.copy(format = "$bits-bit · ${rate / 1000} kHz")
+                val c = _state.value.codec
+                _state.value = _state.value.copy(
+                    format = (if (c.isNotEmpty()) "$c · " else "") +
+                             "$bits-bit · ${rate / 1000} kHz"
+                )
             }
             onFinished = {
                 // A deliberate pause/stop also ends the decode loop. Without this
@@ -131,9 +145,11 @@ class PlaybackService : Service() {
         }
         index = i
         pausedAtMs = fromMs
+        val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
-            positionMs = fromMs, durationMs = t.durationMs, error = null
+            positionMs = fromMs, durationMs = t.durationMs, error = null,
+            artist = t.artist, album = t.album, codec = codec, format = ""
         )
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)

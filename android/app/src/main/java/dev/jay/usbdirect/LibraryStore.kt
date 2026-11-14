@@ -39,7 +39,8 @@ object LibraryStore {
                         trackNo = o.optInt("trackNo"),
                         durationMs = o.optLong("durationMs"),
                         sampleRate = o.optInt("sampleRate"),
-                        bitDepth = o.optInt("bitDepth")
+                        bitDepth = o.optInt("bitDepth"),
+                        codec = o.optString("codec")
                     )
                 )
             }
@@ -65,6 +66,7 @@ object LibraryStore {
                         put("durationMs", t.durationMs)
                         put("sampleRate", t.sampleRate)
                         put("bitDepth", t.bitDepth)
+                        put("codec", t.codec)
                     }
                 )
             }

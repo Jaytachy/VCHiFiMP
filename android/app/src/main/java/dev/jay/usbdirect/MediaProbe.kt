@@ -47,6 +47,23 @@ object MediaProbe {
         }
     }
 
+    /** Fallback codec label from the file extension. */
+    fun codecOf(uri: Uri): String {
+        val name = uri.lastPathSegment ?: uri.path ?: return ""
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "flac" -> "FLAC"
+            "wav", "aiff", "aif" -> "PCM"
+            "mp3" -> "MP3"
+            "m4a", "alac" -> "ALAC"
+            "aac" -> "AAC"
+            "ogg" -> "OGG"
+            "opus" -> "OPUS"
+            "dsf", "dff" -> "DSD"
+            else -> ext.uppercase()
+        }
+    }
+
     fun titleOf(uri: Uri): String =
         uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')
             ?: File(uri.path ?: "").nameWithoutExtension.ifEmpty { "track" }

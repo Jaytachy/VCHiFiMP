@@ -96,7 +96,8 @@ fun MiniPlayer(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
-    onVolume: (Float) -> Unit
+    onVolume: (Float) -> Unit,
+    onExpand: () -> Unit = {}
 ) {
     if (transport.title.isEmpty()) return
 
@@ -109,7 +110,10 @@ fun MiniPlayer(
         color = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().clickable { onExpand() }
+            ) {
                 Text(
                     transport.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium,

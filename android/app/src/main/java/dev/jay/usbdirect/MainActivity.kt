@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var folderLabel by mutableStateOf("")
     private var artVersion by mutableStateOf(0)
+    private var showNowPlaying by mutableStateOf(false)
 
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
@@ -129,6 +130,7 @@ class MainActivity : ComponentActivity() {
             scanState = "pick a folder to start"
         }
         dacName = audioDevice()?.productName ?: ""
+        if (intent?.getBooleanExtra("nowplaying", false) == true) showNowPlaying = true
         Log.i("VCProbe", "tab extra=" + (intent?.getStringExtra("tab") ?: "none"))
         when (intent?.getStringExtra("tab")) {
             "music" -> tab = Tab.MUSIC
@@ -156,6 +158,30 @@ class MainActivity : ComponentActivity() {
 
                     val album = openAlbum
                     if (album != null) BackHandler { openAlbum = null }
+                    if (showNowPlaying) BackHandler { showNowPlaying = false }
+                    if (showNowPlaying) {
+                        NowPlayingScreen(
+                            transport = transport,
+                            art = ArtStore.existing(
+                                this@MainActivity, transport.album, transport.artist
+                            ),
+                            volume = volume,
+                            onClose = { showNowPlaying = false },
+                            onPlayPause = {
+                                if (transport.playing) service?.pause() else service?.resume()
+                            },
+                            onPrev = { service?.previous() },
+                            onNext = { service?.next() },
+                            onSeek = { service?.seekTo(it) },
+                            onVolume = {
+                                volume = it
+                                service?.setVolume(it)
+                                getPreferences(MODE_PRIVATE).edit()
+                                    .putFloat("volume", it).apply()
+                            }
+                        )
+                        return@Surface
+                    }
 
                     Scaffold(
                         bottomBar = {
@@ -175,7 +201,8 @@ class MainActivity : ComponentActivity() {
                                         service?.setVolume(it)
                                         getPreferences(MODE_PRIVATE).edit()
                                             .putFloat("volume", it).apply()
-                                    }
+                                    },
+                                    onExpand = { showNowPlaying = true }
                                 )
                                 BottomNav(tab, { tab = it })
                             }
