@@ -55,14 +55,27 @@ private val Light = lightColorScheme(
 )
 
 @Composable
-fun VcTheme(dark: Boolean, dynamic: Boolean = false, content: @Composable () -> Unit) {
+fun VcTheme(
+    dark: Boolean,
+    dynamic: Boolean = false,
+    amoled: Boolean = false,
+    content: @Composable () -> Unit
+) {
     val context = LocalContext.current
-    val scheme = when {
+    val base = when {
         dynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
             if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         dark -> Dark
         else -> Light
     }
+    // Pitch-black containers for AMOLED panels, only meaningful in dark mode.
+    val scheme = if (dark && amoled) base.copy(
+        background = Color(0xFF000000),
+        surface = Color(0xFF000000),
+        surfaceContainer = Color(0xFF000000),
+        surfaceContainerHigh = Color(0xFF0A0A0A),
+        surfaceContainerHighest = Color(0xFF141414)
+    ) else base
     MaterialTheme(colorScheme = scheme, content = content)
 }
 

@@ -10,6 +10,9 @@ import android.content.Context
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -32,7 +35,9 @@ data class LastPlayed(
     val artist: String,
     val album: String,
     val durationMs: Long,
-    val codec: String
+    val codec: String,
+    /** Exact resume point; 0 on entries written by older builds. */
+    val positionMs: Long = 0L
 )
 
 data class Track(
@@ -98,6 +103,7 @@ class PlaybackService : Service() {
     private var index = -1
     private var device: UsbDevice? = null
     private var pausedAtMs = 0L
+    private var lastPosPersistMs = 0L
     private var volume = 0.2f
     /** 0 = match each source track, else fixed 16/24. */
     private var bits = 0
@@ -110,6 +116,12 @@ class PlaybackService : Service() {
     @Volatile private var mixerByUser = false
     @Volatile private var gaplessEnabled = true
     @Volatile private var autoReclaim = true
+
+    private var focusRequest: AudioFocusRequest? = null
+    private var hasFocus = false
+    /** Supplies a shuffled batch of unplayed library tracks for smart autoplay. */
+    var queueRefillProvider: (() -> List<Track>)? = null
+    @Volatile private var smartAutoplay = true
 
     private val _sleepRemaining = MutableStateFlow<Long?>(null)
     val sleepRemaining: StateFlow<Long?> = _sleepRemaining.asStateFlow()
@@ -129,6 +141,12 @@ class PlaybackService : Service() {
                 // position after pause; that is what made the resume point drift.
                 if (_state.value.playing && !suppressFinish) {
                     _state.value = _state.value.copy(positionMs = ms)
+                    // keep the cold-start resume point fresh without touching
+                    // the lastPlayed flow every tick
+                    if (ms - lastPosPersistMs >= 15_000L) {
+                        lastPosPersistMs = ms
+                        persistLastPlayedPosition(ms)
+                    }
                 }
             }
             onFormat = { rate, bits ->
@@ -153,6 +171,7 @@ class PlaybackService : Service() {
             setBitDepthPolicy(auto = bits == 0, bits = if (bits == 0) 24 else bits)
             gaplessEnabled = prefs.getBoolean("gapless", true)
             autoReclaim = prefs.getBoolean("autoReclaim", true)
+            smartAutoplay = prefs.getBoolean("smartAutoplay", true)
             // inside apply{} the receiver is the player we are constructing
             resamplerQuality = prefs.getInt("srcQuality", NativeResampler.QUALITY_MEDIUM)
             setDither(prefs.getBoolean("dither", true))
@@ -220,6 +239,7 @@ class PlaybackService : Service() {
         val pos = player.positionMs()
         val wasPlaying = _state.value.playing
         if (pos > 0 && index >= 0) pausedAtMs = pos
+        if (index >= 0) persistLastPlayedPosition(pausedAtMs, emit = true)
         Log.i("VCProbe", "DAC detached: idx=$index title='${_state.value.title}' pos=$pos wasPlaying=$wasPlaying")
         suppressFinish = true
         player.stop()
@@ -235,12 +255,13 @@ class PlaybackService : Service() {
             positionMs = if (pos > 0) pos else _state.value.positionMs,
             error = null
         )
+        abandonAudioFocus()
         publish(if (_state.value.paused) PlaybackState.STATE_PAUSED
                 else PlaybackState.STATE_NONE)
         if (wasPlaying) startForegroundInternal(_state.value.title)
     }
 
-    fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
+    fun setQueue(tracks: List<Track>, startIndex: Int = 0, startAtMs: Long = 0L) {
         originalQueue.clear()
         originalQueue.addAll(tracks)
         val start = tracks.getOrNull(startIndex) ?: return
@@ -252,12 +273,12 @@ class PlaybackService : Service() {
             queue.addAll(tracks.filterIndexed { i, _ -> i != startIndex }.shuffled())
             _queueFlow.value = queue.toList()
             _state.value = _state.value.copy(queueSize = queue.size)
-            playAt(0)
+            playAt(0, startAtMs)
         } else {
             queue.addAll(tracks)
             _queueFlow.value = queue.toList()
             _state.value = _state.value.copy(queueSize = queue.size)
-            playAt(startIndex)
+            playAt(startIndex, startAtMs)
         }
     }
 
@@ -309,27 +330,48 @@ class PlaybackService : Service() {
             val o = org.json.JSONObject(raw)
             _lastPlayed.value = LastPlayed(
                 o.getString("uri"), o.getString("title"), o.optString("artist"),
-                o.optString("album"), o.optLong("durationMs"), o.optString("codec")
+                o.optString("album"), o.optLong("durationMs"), o.optString("codec"),
+                o.optLong("positionMs")
             )
         }
     }
 
+    private fun lastPlayedJson(lp: LastPlayed): String = org.json.JSONObject().apply {
+        put("uri", lp.uri); put("title", lp.title); put("artist", lp.artist)
+        put("album", lp.album); put("durationMs", lp.durationMs); put("codec", lp.codec)
+        put("positionMs", lp.positionMs)
+    }.toString()
+
     private fun saveLastPlayed(lp: LastPlayed) {
         _lastPlayed.value = lp
-        val o = org.json.JSONObject().apply {
-            put("uri", lp.uri); put("title", lp.title); put("artist", lp.artist)
-            put("album", lp.album); put("durationMs", lp.durationMs); put("codec", lp.codec)
-        }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putString("lastPlayed", o.toString()).apply()
+            .putString("lastPlayed", lastPlayedJson(lp)).apply()
+    }
+
+    /**
+     * Store the resume point on disk. [emit] also pushes it to the UI, which is
+     * only worth doing on pause/stop; routine progress ticks stay off the flow.
+     */
+    private fun persistLastPlayedPosition(ms: Long, emit: Boolean = false) {
+        val lp = _lastPlayed.value ?: return
+        val copy = lp.copy(positionMs = ms.coerceAtLeast(0L))
+        if (emit) _lastPlayed.value = copy
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString("lastPlayed", lastPlayedJson(copy)).apply()
     }
 
     /** Used by Home on a cold start, when no queue exists yet. */
     fun resumeLast() {
         val lp = _lastPlayed.value ?: return
+        val startMs = if (lp.durationMs > 0L) {
+            lp.positionMs.coerceIn(0L, (lp.durationMs - 1000L).coerceAtLeast(0L))
+        } else {
+            lp.positionMs.coerceAtLeast(0L)
+        }
         setQueue(
             listOf(Track(Uri.parse(lp.uri), lp.title, lp.durationMs, lp.artist, lp.album, lp.codec)),
-            0
+            0,
+            startMs
         )
     }
 
@@ -354,6 +396,7 @@ class PlaybackService : Service() {
         val outBits = bitsFor(t)
         index = i
         pausedAtMs = fromMs
+        lastPosPersistMs = fromMs
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
@@ -362,9 +405,10 @@ class PlaybackService : Service() {
             missingUri = null
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
-                                   t.durationMs, codec))
+                                   t.durationMs, codec, fromMs))
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
+        requestAudioFocus()
         player.start(d, t.uri, 48000, outBits, volume, fromMs, useMixer = mixer)
     }
 
@@ -378,7 +422,9 @@ class PlaybackService : Service() {
         _state.value = _state.value.copy(playing = false, paused = true)
         player.stop()
         suppressFinish = false
+        persistLastPlayedPosition(pausedAtMs, emit = true)
         publish(PlaybackState.STATE_PAUSED)
+        abandonAudioFocus()
         // keep the notification: dropping the foreground state made the whole
         // thing disappear, which is not what a pause means
         startForegroundInternal(_state.value.title)
@@ -419,7 +465,22 @@ class PlaybackService : Service() {
         when (repeatMode) {
             RepeatMode.ONE -> playAt(index, 0L)
             RepeatMode.ALL -> playAt(if (index + 1 < queue.size) index + 1 else 0)
-            RepeatMode.OFF -> if (index + 1 < queue.size) playAt(index + 1) else stop()
+            RepeatMode.OFF -> when {
+                index + 1 < queue.size -> playAt(index + 1)
+                smartAutoplay -> {
+                    val extra = queueRefillProvider?.invoke().orEmpty()
+                    if (extra.isEmpty()) stop()
+                    else {
+                        Log.i("VCProbe", "smart autoplay: +${extra.size} tracks")
+                        queue.addAll(extra)
+                        originalQueue.addAll(extra)
+                        _queueFlow.value = queue.toList()
+                        _state.value = _state.value.copy(queueSize = queue.size)
+                        playAt(index + 1)
+                    }
+                }
+                else -> stop()
+            }
         }
     }
 
@@ -429,7 +490,9 @@ class PlaybackService : Service() {
         suppressFinish = false
         pausedAtMs = 0
         _state.value = _state.value.copy(playing = false, paused = false, positionMs = 0)
+        persistLastPlayedPosition(0L, emit = true)
         publish(PlaybackState.STATE_STOPPED)
+        abandonAudioFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -511,6 +574,58 @@ class PlaybackService : Service() {
 
     fun sleepMinutesLeft(): Long? = _sleepRemaining.value?.let { (it + 59_999) / 60_000 }
 
+    fun setSmartAutoplay(on: Boolean) {
+        smartAutoplay = on
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean("smartAutoplay", on).apply()
+    }
+
+    /** Restore the Home "continue listening" entry from an imported backup. */
+    fun restoreLastPlayed(json: String?) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString("lastPlayed", json).apply()
+        loadLastPlayed()
+    }
+
+    private fun requestAudioFocus() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+        val req = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(attrs)
+            .setOnAudioFocusChangeListener { change -> main.post { onFocusChange(change) } }
+            .build()
+            .also { focusRequest = it }
+        val res = am.requestAudioFocus(req)
+        hasFocus = res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        Log.i("VCProbe", "audio focus request -> $res")
+    }
+
+    private fun abandonAudioFocus() {
+        val req = focusRequest ?: return
+        if (!hasFocus) return
+        hasFocus = false
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.abandonAudioFocusRequest(req)
+        Log.i("VCProbe", "audio focus abandoned")
+    }
+
+    /**
+     * USB audio bypasses AudioFlinger, so ducking via the Android mixer would
+     * not affect what the DAC hears. Loss always means pause.
+     */
+    private fun onFocusChange(change: Int) {
+        Log.i("VCProbe", "audio focus change=$change playing=${_state.value.playing}")
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK ->
+                if (_state.value.playing) pause()
+        }
+    }
+
     /** true = take the device over (bit-perfect). false = Android's mixer. */
     fun setExclusive(on: Boolean) {
         exclusive = on
@@ -536,6 +651,7 @@ class PlaybackService : Service() {
         val t = queue.getOrNull(idx) ?: return
         index = idx
         pausedAtMs = 0
+        lastPosPersistMs = 0
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
         _state.value = _state.value.copy(
             index = idx, title = t.title, artist = t.artist, album = t.album,

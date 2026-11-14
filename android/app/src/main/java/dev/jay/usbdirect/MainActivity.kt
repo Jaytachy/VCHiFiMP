@@ -12,6 +12,8 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.provider.DocumentsContract
+import android.view.WindowManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -28,6 +30,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -70,6 +73,17 @@ class MainActivity : ComponentActivity() {
     private var skipShort by mutableStateOf(false)
     private var sleepMinutes by mutableStateOf(0)
     private var sleepRemaining by mutableStateOf<Long?>(null)
+    private var dynamicMaterial by mutableStateOf(true)
+    private var amoled by mutableStateOf(false)
+    private var excludedFolders by mutableStateOf<Set<String>>(emptySet())
+    private var autoPlayDac by mutableStateOf(false)
+    private var keepScreenOn by mutableStateOf(false)
+    private var smartAutoplay by mutableStateOf(true)
+    private var swipeUpMini by mutableStateOf(true)
+    private var showFolderPicker by mutableStateOf(false)
+    private var allTracks by mutableStateOf<List<LibTrack>>(emptyList())
+    private var backupMessage by mutableStateOf<String?>(null)
+    private var playingNow by mutableStateOf(false)
     private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
     private var pendingPlay: Pair<List<Track>, Int>? = null
@@ -90,6 +104,12 @@ class MainActivity : ComponentActivity() {
             svc.setDither(dither)
             svc.setGapless(gaplessOn)
             svc.setAutoReclaim(autoReclaim)
+            svc.setSmartAutoplay(smartAutoplay)
+            svc.queueRefillProvider = {
+                val existing = svc.queueFlow.value.map { it.uri }.toSet()
+                allTracks.filter { it.uri !in existing }
+                    .shuffled().take(20).map { it.toQueueTrack() }
+            }
             // needed so Home's "continue listening" can start on a cold launch
             val dac = audioDevice()
             if (dac != null && usbManager.hasPermission(dac)) {
@@ -112,6 +132,7 @@ class MainActivity : ComponentActivity() {
             lifecycleScope.launch {
                 var lastMissing: String? = null
                 svc.state.collect { st ->
+                    playingNow = st.playing
                     val m = st.missingUri
                     if (m == null) { lastMissing = null; return@collect }
                     if (m != lastMissing) { lastMissing = m; removeFromLibrary(m) }
@@ -293,6 +314,14 @@ class MainActivity : ComponentActivity() {
         gaplessOn = getPreferences(MODE_PRIVATE).getBoolean("gapless", true)
         autoReclaim = getPreferences(MODE_PRIVATE).getBoolean("autoReclaim", true)
         skipShort = getPreferences(MODE_PRIVATE).getBoolean("skipShort", false)
+        dynamicMaterial = getPreferences(MODE_PRIVATE).getBoolean("dynamicMaterial", true)
+        amoled = getPreferences(MODE_PRIVATE).getBoolean("amoled", false)
+        excludedFolders = getPreferences(MODE_PRIVATE)
+            .getStringSet("excludedFolders", emptySet())!!.toSet()
+        autoPlayDac = getPreferences(MODE_PRIVATE).getBoolean("autoPlayDac", false)
+        keepScreenOn = getPreferences(MODE_PRIVATE).getBoolean("keepScreenOn", false)
+        smartAutoplay = getPreferences(MODE_PRIVATE).getBoolean("smartAutoplay", true)
+        swipeUpMini = getPreferences(MODE_PRIVATE).getBoolean("swipeUpMini", true)
         exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
         hardwareVolume = getPreferences(MODE_PRIVATE).getBoolean("hwvol", false)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
@@ -303,9 +332,10 @@ class MainActivity : ComponentActivity() {
             val tree = Uri.parse(savedTree)
             val cached = LibraryStore.load(this, tree)
             if (cached != null) {
-                tracks = cached
-                albums = LibraryScanner.albums(cached)
-                scanState = "${cached.size} tracks, ${albums.size} albums"
+                allTracks = cached
+                tracks = applyFilters(cached)
+                albums = LibraryScanner.albums(tracks)
+                scanState = "${tracks.size} tracks, ${albums.size} albums"
             } else {
                 scan(tree)
             }
@@ -334,6 +364,27 @@ class MainActivity : ComponentActivity() {
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                         service?.setQueue(listOf(ta, tb), 0)
                     }, 1500)
+                }
+            }
+            if (intent?.getBooleanExtra("backup", false) == true) {
+                val f = java.io.File(getExternalFilesDir(null), "vchifimp_backup.json")
+                runCatching { exportBackup(Uri.fromFile(f)) }
+                    .onFailure { Log.e("VCProbe", "backup debug export failed", it) }
+            }
+            if (intent?.getBooleanExtra("restore", false) == true) {
+                val f = java.io.File(getExternalFilesDir(null), "vchifimp_backup.json")
+                runCatching { importBackup(Uri.fromFile(f)) }
+                    .onFailure { Log.e("VCProbe", "backup debug import failed", it) }
+            }
+            if (intent?.getBooleanExtra("smarttest", false) == true) {
+                val dir = getExternalFilesDir(null)
+                val a = java.io.File(dir, "tone16.wav")
+                if (a.exists()) {
+                    service?.setSmartAutoplay(true)
+                    service?.setQueue(
+                        listOf(Track(Uri.fromFile(a), "smart tone", 8000, "test", "test", "WAV", 16)),
+                        0
+                    )
                 }
             }
             if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
@@ -386,8 +437,31 @@ class MainActivity : ComponentActivity() {
                     isAppearanceLightNavigationBars = !darkNow
                 }
             }
-            VcTheme(dark = darkNow) {
+            androidx.compose.runtime.DisposableEffect(keepScreenOn, playingNow) {
+                if (keepScreenOn && playingNow) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                onDispose {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+            VcTheme(dark = darkNow, dynamic = dynamicMaterial, amoled = amoled) {
                 Surface(Modifier.fillMaxSize()) {
+                    val exportBackupLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.CreateDocument("application/json")
+                    ) { uri ->
+                        if (uri != null) runCatching { exportBackup(uri) }
+                            .onFailure { backupMessage = "Export failed: ${it.message}" }
+                    }
+                    val importBackupLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.OpenDocument()
+                    ) { uri ->
+                        if (uri != null) runCatching { importBackup(uri) }
+                            .onFailure { backupMessage = "Import failed: ${it.message}" }
+                    }
+
                     val picker = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocumentTree()
                     ) { uri ->
@@ -516,6 +590,7 @@ class MainActivity : ComponentActivity() {
                                     transportFlow = service?.state,
                                     volume = volume,
                                     artVersion = artVersion,
+                                    swipeUpToExpand = swipeUpMini,
                                     onPlayPause = {
                                         if (service?.state?.value?.playing == true) service?.pause()
                                         else service?.resume()
@@ -541,6 +616,7 @@ class MainActivity : ComponentActivity() {
                                     transportFlow = service?.state,
                                     lastPlayed = lastPlayed,
                                     albums = albums,
+                                    tracks = tracks,
                                     artVersion = artVersion,
                                     dacName = dacName,
                                     exclusive = exclusive,
@@ -548,12 +624,17 @@ class MainActivity : ComponentActivity() {
                                     favoritesCount = favorites.size,
                                     onFavorites = { showFavorites = true },
                                     onResumeLast = { service?.resumeLast() },
+                                    onPlayPause = {
+                                        val st = service?.state?.value
+                                        when {
+                                            st?.playing == true -> service?.pause()
+                                            st != null && st.title.isNotEmpty() -> service?.resume()
+                                            else -> service?.resumeLast()
+                                        }
+                                    },
                                     onShuffleAll = { shuffleAll() },
-                                    onOpenAlbum = { openAlbum = it },
-                                    onShortcut = {
-                                        librarySection = it
-                                        tab = Tab.MUSIC
-                                    }
+                                    onPlayTracks = { list -> if (list.isNotEmpty()) playList(list, 0) },
+                                    onOpenAlbum = { openAlbum = it }
                                 )
                                 Tab.MUSIC -> MusicScreen(
                                     albums = albums,
@@ -668,9 +749,65 @@ class MainActivity : ComponentActivity() {
                                         skipShort = it
                                         getPreferences(MODE_PRIVATE).edit()
                                             .putBoolean("skipShort", it).apply()
-                                        getPreferences(MODE_PRIVATE).getString("tree", null)
-                                            ?.let { t -> scan(Uri.parse(t)) }
-                                    }
+                                        tracks = applyFilters(allTracks)
+                                        albums = LibraryScanner.albums(tracks)
+                                        scanState = "${tracks.size} tracks, ${albums.size} albums"
+                                    },
+                                    dynamicMaterial = dynamicMaterial,
+                                    onDynamicMaterial = {
+                                        dynamicMaterial = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("dynamicMaterial", it).apply()
+                                    },
+                                    amoled = amoled,
+                                    onAmoled = {
+                                        amoled = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("amoled", it).apply()
+                                    },
+                                    excludedFolders = excludedFolders,
+                                    folderOptions = allTracks.map { folderOf(it.uri) }
+                                        .filter { it.isNotEmpty() }.distinct().sorted(),
+                                    onToggleFolder = { folder ->
+                                        excludedFolders = if (excludedFolders.contains(folder))
+                                            excludedFolders - folder else excludedFolders + folder
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putStringSet("excludedFolders", excludedFolders)
+                                            .apply()
+                                        tracks = applyFilters(allTracks)
+                                        albums = LibraryScanner.albums(tracks)
+                                        scanState = "${tracks.size} tracks, ${albums.size} albums"
+                                    },
+                                    autoPlayDac = autoPlayDac,
+                                    onAutoPlayDac = {
+                                        autoPlayDac = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("autoPlayDac", it).apply()
+                                    },
+                                    keepScreenOn = keepScreenOn,
+                                    onKeepScreenOn = {
+                                        keepScreenOn = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("keepScreenOn", it).apply()
+                                    },
+                                    smartAutoplay = smartAutoplay,
+                                    onSmartAutoplay = {
+                                        smartAutoplay = it
+                                        service?.setSmartAutoplay(it)
+                                    },
+                                    swipeUpMini = swipeUpMini,
+                                    onSwipeUpMini = {
+                                        swipeUpMini = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("swipeUpMini", it).apply()
+                                    },
+                                    onExportBackup = { exportBackupLauncher.launch("vchifimp_backup.json") },
+                                    onImportBackup = {
+                                        importBackupLauncher.launch(
+                                            arrayOf("application/json", "text/plain", "*/*")
+                                        )
+                                    },
+                                    backupMessage = backupMessage
                                 )
                             }
                         }
@@ -678,6 +815,129 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+
+    /* ------------------------------------------------------ backup/restore */
+
+    private fun exportBackup(uri: Uri) {
+        val settings = org.json.JSONObject().apply {
+            put("theme", themeMode.name)
+            put("dynamicMaterial", dynamicMaterial)
+            put("amoled", amoled)
+            put("artColors", dynamicColors)
+            put("outBits", outputBits)
+            put("srcQuality", srcQuality)
+            put("dither", dither)
+            put("gapless", gaplessOn)
+            put("autoReclaim", autoReclaim)
+            put("skipShort", skipShort)
+            put("autoPlayDac", autoPlayDac)
+            put("keepScreenOn", keepScreenOn)
+            put("smartAutoplay", smartAutoplay)
+            put("swipeUpMini", swipeUpMini)
+            put("sleepMinutes", sleepMinutes)
+            put("volume", volume.toDouble())
+            put("hardwareVolume", hardwareVolume)
+            put("exclusive", exclusive)
+        }
+        val root = org.json.JSONObject().apply {
+            put("app", "VCHiFiMP")
+            put("version", BuildConfig.VERSION_NAME)
+            put("exportedAt", System.currentTimeMillis())
+            put("settings", settings)
+            put("favorites", org.json.JSONArray(favorites.toList()))
+            put("excludedFolders", org.json.JSONArray(excludedFolders.toList()))
+            put("lastPlayed", getSharedPreferences("vc", MODE_PRIVATE)
+                .getString("lastPlayed", null))
+        }
+        contentResolver.openOutputStream(uri)?.use {
+            it.write(root.toString(2).toByteArray())
+        } ?: throw IllegalStateException("cannot open backup destination")
+        backupMessage = "Backup exported"
+        Log.i("VCProbe", "backup exported ($uri)")
+    }
+
+    private fun importBackup(uri: Uri) {
+        val text = contentResolver.openInputStream(uri)?.bufferedReader()
+            ?.use { it.readText() } ?: return
+        val root = org.json.JSONObject(text)
+        val st = root.optJSONObject("settings") ?: org.json.JSONObject()
+        fun bool(k: String, d: Boolean) = if (st.has(k)) st.getBoolean(k) else d
+        fun int(k: String, d: Int) = if (st.has(k)) st.getInt(k) else d
+
+        themeMode = runCatching { ThemeMode.valueOf(st.optString("theme", themeMode.name)) }
+            .getOrDefault(themeMode)
+        dynamicMaterial = bool("dynamicMaterial", dynamicMaterial)
+        amoled = bool("amoled", amoled)
+        dynamicColors = bool("artColors", dynamicColors)
+        outputBits = int("outBits", outputBits)
+        srcQuality = int("srcQuality", srcQuality)
+        dither = bool("dither", dither)
+        gaplessOn = bool("gapless", gaplessOn)
+        autoReclaim = bool("autoReclaim", autoReclaim)
+        skipShort = bool("skipShort", skipShort)
+        autoPlayDac = bool("autoPlayDac", autoPlayDac)
+        keepScreenOn = bool("keepScreenOn", keepScreenOn)
+        smartAutoplay = bool("smartAutoplay", smartAutoplay)
+        swipeUpMini = bool("swipeUpMini", swipeUpMini)
+        sleepMinutes = int("sleepMinutes", sleepMinutes)
+        volume = if (st.has("volume")) st.getDouble("volume").toFloat() else volume
+        hardwareVolume = bool("hardwareVolume", hardwareVolume)
+        exclusive = bool("exclusive", exclusive)
+
+        favorites = root.optJSONArray("favorites")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optString(it).ifEmpty { null } }.toSet()
+        } ?: favorites
+        Favorites.save(this, favorites)
+
+        excludedFolders = root.optJSONArray("excludedFolders")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optString(it).ifEmpty { null } }.toSet()
+        } ?: excludedFolders
+
+        getPreferences(MODE_PRIVATE).edit().apply {
+            putString("theme", themeMode.name)
+            putBoolean("dynamicMaterial", dynamicMaterial)
+            putBoolean("amoled", amoled)
+            putBoolean("dynColors", dynamicColors)
+            putInt("outBits", outputBits)
+            putInt("srcQuality", srcQuality)
+            putBoolean("dither", dither)
+            putBoolean("gapless", gaplessOn)
+            putBoolean("autoReclaim", autoReclaim)
+            putBoolean("skipShort", skipShort)
+            putBoolean("autoPlayDac", autoPlayDac)
+            putBoolean("keepScreenOn", keepScreenOn)
+            putBoolean("smartAutoplay", smartAutoplay)
+            putBoolean("swipeUpMini", swipeUpMini)
+            putStringSet("excludedFolders", excludedFolders)
+            putFloat("volume", volume)
+            putBoolean("hwvol", hardwareVolume)
+            putBoolean("exclusive", exclusive)
+            apply()
+        }
+
+        service?.apply {
+            setOutputBits(outputBits)
+            setResamplerQuality(srcQuality)
+            setDither(dither)
+            setGapless(gaplessOn)
+            setAutoReclaim(autoReclaim)
+            setSmartAutoplay(smartAutoplay)
+            setVolume(volume)
+            setHardwareVolume(hardwareVolume)
+            setExclusive(exclusive)
+            setSleepTimer(sleepMinutes)
+            restoreLastPlayed(
+                root.optString("lastPlayed").takeIf { it.isNotBlank() && it != "null" }
+            )
+        }
+
+        tracks = applyFilters(allTracks)
+        albums = LibraryScanner.albums(tracks)
+        scanState = "${tracks.size} tracks, ${albums.size} albums"
+        backupMessage = "Backup restored"
+        Log.i("VCProbe", "backup imported ($uri)")
     }
 
     /* ------------------------------------------------------------- albums */
@@ -769,10 +1029,15 @@ class MainActivity : ComponentActivity() {
     private fun attachDac(d: UsbDevice) {
         dacName = d.productName ?: "USB DAC"
         exclusive = true
+        val wasPaused = service?.state?.value?.paused == true
         service?.setDevice(d, outputBits, volume)
         service?.setExclusive(true)
         getPreferences(MODE_PRIVATE).edit().putBoolean("exclusive", true).apply()
-        Log.i("VCProbe", "DAC attached: $dacName")
+        Log.i("VCProbe", "DAC attached: $dacName (autoPlay=$autoPlayDac wasPaused=$wasPaused)")
+        if (autoPlayDac && wasPaused) {
+            android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed({ service?.resume() }, 400)
+        }
     }
 
     private fun requestUsb(d: UsbDevice) {
@@ -781,6 +1046,24 @@ class MainActivity : ComponentActivity() {
                 this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
             )
         )
+    }
+
+    /** Folder a track lives in, from the SAF document id ("Music/Album"). */
+    private fun folderOf(uri: Uri): String {
+        val id = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return ""
+        val path = id.substringAfter(':', id).trimStart('/')
+        return path.substringBeforeLast('/', "")
+    }
+
+    /** Short-track and excluded-folder filters applied to every library view. */
+    private fun applyFilters(src: List<LibTrack>): List<LibTrack> {
+        var out = src
+        if (skipShort) out = out.filter { it.durationMs >= 30_000 }
+        if (excludedFolders.isNotEmpty()) out = out.filter { t ->
+            val f = folderOf(t.uri)
+            excludedFolders.none { f == it || f.startsWith("$it/") }
+        }
+        return out
     }
 
     /** True when Android's audio stack currently exposes a USB output. */
@@ -809,6 +1092,7 @@ class MainActivity : ComponentActivity() {
     /** A track vanished on disk: drop it from the in-memory library and cache. */
     private fun removeFromLibrary(uriString: String) {
         val before = tracks.size
+        allTracks = allTracks.filterNot { it.uri.toString() == uriString }
         tracks = tracks.filterNot { it.uri.toString() == uriString }
         if (tracks.size == before) return
         albums = LibraryScanner.albums(tracks)
@@ -833,8 +1117,11 @@ class MainActivity : ComponentActivity() {
                 onProgress = { n, name -> scanState = "scanning  $n  $name" },
                 cancel = cancelScan
             )
-            val found = if (skipShort) raw.filter { it.durationMs >= 30_000 } else raw
-            LibraryStore.save(this, tree, found)
+            allTracks = raw
+            val found = applyFilters(raw)
+            // the cache keeps the unfiltered scan so folder/short-track filters
+            // can be changed without re-walking SAF
+            LibraryStore.save(this, tree, raw)
             val grouped = LibraryScanner.albums(found)
 
             // publish first, then fill in artwork behind it

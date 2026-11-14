@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.aspectRatio
@@ -22,9 +23,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.List
@@ -38,11 +43,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.graphics.BitmapFactory
@@ -127,7 +137,8 @@ fun MiniPlayer(
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
-    onExpand: () -> Unit = {}
+    onExpand: () -> Unit = {},
+    swipeUpToExpand: Boolean = false
 ) {
     val transport = rememberTransport(transportFlow)
     if (transport.title.isEmpty()) return
@@ -143,6 +154,24 @@ fun MiniPlayer(
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 6.dp)
             .clickable { onExpand() }
+            .then(
+                if (!swipeUpToExpand) Modifier else Modifier.pointerInput(Unit) {
+                    var drag = 0f
+                    detectVerticalDragGestures(
+                        onVerticalDrag = { change, delta ->
+                            if (delta < 0f || drag < 0f) {
+                                drag += delta
+                                change.consume()
+                            }
+                        },
+                        onDragEnd = {
+                            if (drag < -60.dp.toPx()) onExpand()
+                            drag = 0f
+                        },
+                        onDragCancel = { drag = 0f }
+                    )
+                }
+            )
     ) {
         Column {
             // razor-thin progress along the top edge
@@ -189,11 +218,31 @@ fun MiniPlayer(
 
 /* ---------------------------------------------------------------- home */
 
+private fun isHiResTrack(t: LibTrack): Boolean =
+    t.bitDepth > 16 || t.sampleRate > 48_000
+
+private fun khzLabel(rate: Int): String {
+    val k = rate / 1000.0
+    return if (k == k.toInt().toDouble()) "${k.toInt()} kHz" else "%.1f kHz".format(k)
+}
+
+/** Corner badge for a hi-res album: depth wins over rate when both are known. */
+private fun hiResBadge(a: LibAlbum): String? {
+    val bits = a.tracks.maxOfOrNull { it.bitDepth } ?: 0
+    val rate = a.tracks.maxOfOrNull { it.sampleRate } ?: 0
+    return when {
+        bits > 16 -> "$bits-BIT"
+        rate > 48_000 -> khzLabel(rate)
+        else -> null
+    }
+}
+
 @Composable
 fun HomeScreen(
     transportFlow: StateFlow<TransportState>?,
     lastPlayed: LastPlayed?,
     albums: List<LibAlbum>,
+    tracks: List<LibTrack>,
     artVersion: Int,
     dacName: String,
     exclusive: Boolean,
@@ -201,9 +250,10 @@ fun HomeScreen(
     favoritesCount: Int,
     onFavorites: () -> Unit,
     onResumeLast: () -> Unit,
+    onPlayPause: () -> Unit,
     onShuffleAll: () -> Unit,
-    onOpenAlbum: (LibAlbum) -> Unit,
-    onShortcut: (LibSection) -> Unit
+    onPlayTracks: (List<LibTrack>) -> Unit,
+    onOpenAlbum: (LibAlbum) -> Unit
 ) {
     val transport = rememberTransport(transportFlow)
     val showingNow = transport.title.isNotEmpty()
@@ -214,136 +264,417 @@ fun HomeScreen(
         } else "Phone audio"
     val bitPerfect = exclusive && transport.playing && transport.format.isNotEmpty()
 
+    val recentlyAdded = remember(albums) {
+        albums.sortedByDescending { a -> a.tracks.maxOfOrNull { it.modifiedMs } ?: 0L }
+            .take(12)
+    }
+    val hiResTracks = remember(tracks) { tracks.filter(::isHiResTrack) }
+    val hiResAlbums = remember(albums) {
+        albums.filter { a -> a.tracks.any(::isHiResTrack) }.take(12)
+    }
+    val recentTracks = remember(tracks) {
+        tracks.sortedByDescending { it.modifiedMs }.take(60)
+    }
+    val quickPicks = remember(albums) { albums.shuffled().take(12) }
+
     LazyColumn(
-        Modifier.fillMaxSize().padding(horizontal = 20.dp),
-        contentPadding = PaddingValues(bottom = 24.dp)
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 28.dp)
     ) {
         item {
-            Spacer(Modifier.height(26.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("VCHiFiMP", style = MaterialTheme.typography.headlineMedium)
-                    Text(
-                        "Direct USB audio",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                Spacer(Modifier.height(26.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("VCHiFiMP", style = MaterialTheme.typography.headlineMedium)
+                        Text(
+                            "Direct USB audio",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    OutputPill(outputLabel, bitPerfect, onOutput)
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+
+        // ---- 2x2 quick access ----
+        item {
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HomeQuickTile(
+                        title = "Favorites",
+                        subtitle = plural(favoritesCount, "track"),
+                        icon = Icons.Default.Favorite,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f),
+                        onClick = onFavorites
+                    )
+                    HomeQuickTile(
+                        title = "Shuffle All",
+                        subtitle = plural(tracks.size, "track"),
+                        icon = Icons.Default.Shuffle,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.weight(1f),
+                        onClick = onShuffleAll
                     )
                 }
-                OutputPill(outputLabel, bitPerfect, onOutput)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HomeQuickTile(
+                        title = "Hi-Res Masters",
+                        subtitle = if (hiResTracks.isEmpty()) "None found"
+                                   else plural(hiResTracks.size, "track"),
+                        icon = Icons.Default.HighQuality,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            if (hiResTracks.isNotEmpty()) onPlayTracks(hiResTracks.shuffled())
+                        }
+                    )
+                    HomeQuickTile(
+                        title = "Recently Added",
+                        subtitle = if (recentTracks.isEmpty()) "No music yet"
+                                   else plural(recentTracks.size, "track"),
+                        icon = Icons.Default.NewReleases,
+                        tint = Color(0xFFF2A65A),
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            if (recentTracks.isNotEmpty()) onPlayTracks(recentTracks)
+                        }
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
             }
-            Spacer(Modifier.height(22.dp))
         }
 
         // ---- continue listening ----
         val lp = lastPlayed
-        if (lp != null) {
+        if (showingNow || lp != null) {
             item {
-                Text("Continue listening", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(10.dp))
-                Card(
-                    Modifier.fillMaxWidth().clickable { onResumeLast() },
-                    shape = RoundedCornerShape(18.dp)
-                ) {
-                    Row(
-                        Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ArtImage(lp.album, lp.artist, artVersion, Modifier.size(64.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                lp.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Text(
-                                lp.artist.ifEmpty { "Unknown artist" },
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            if (lp.codec.isNotEmpty()) {
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    lp.codec,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        FilledTonalButton(onClick = onResumeLast) {
-                            Text(if (showingNow && transport.paused) "Resume" else "Play")
-                        }
-                    }
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    HomeSectionTitle("Continue listening", "Pick up where you left off")
+                    Spacer(Modifier.height(10.dp))
+                    HomeHeroCard(
+                        title = if (showingNow) transport.title else lp?.title.orEmpty(),
+                        artist = if (showingNow) transport.artist else lp?.artist.orEmpty(),
+                        album = if (showingNow) transport.album else lp?.album.orEmpty(),
+                        positionMs = if (showingNow && transport.durationMs > 0)
+                            transport.positionMs else lp?.positionMs ?: 0L,
+                        durationMs = if (showingNow && transport.durationMs > 0)
+                            transport.durationMs else lp?.durationMs ?: 0L,
+                        playing = showingNow && transport.playing,
+                        paused = showingNow && transport.paused,
+                        artVersion = artVersion,
+                        onAction = { if (showingNow) onPlayPause() else onResumeLast() }
+                    )
+                    Spacer(Modifier.height(24.dp))
                 }
-                Spacer(Modifier.height(22.dp))
             }
         }
 
-        // ---- shortcuts ----
-        item {
-            Text("Library", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                ShortcutTile("Songs", Modifier.weight(1f)) { onShortcut(LibSection.SONGS) }
-                ShortcutTile("Albums", Modifier.weight(1f)) { onShortcut(LibSection.ALBUMS) }
-                ShortcutTile("Artists", Modifier.weight(1f)) { onShortcut(LibSection.ARTISTS) }
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledTonalButton(onClick = onShuffleAll, modifier = Modifier.weight(1f)) {
-                    Text("Shuffle all")
-                }
-                OutlinedButton(onClick = onFavorites, modifier = Modifier.weight(1f)) {
-                    Text("Favorites ($favoritesCount)")
+        // ---- recently added ----
+        if (recentlyAdded.isNotEmpty()) {
+            item {
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    HomeSectionTitle("Recently added", "Fresh in your library")
+                    Spacer(Modifier.height(10.dp))
+                    HomeAlbumCarousel(
+                        albums = recentlyAdded,
+                        artVersion = artVersion,
+                        badgeFor = { null },
+                        onOpenAlbum = onOpenAlbum
+                    )
+                    Spacer(Modifier.height(24.dp))
                 }
             }
-            Spacer(Modifier.height(24.dp))
         }
 
-        // ---- quick picks ----
-        if (albums.isNotEmpty()) {
+        // ---- hi-res masters ----
+        if (hiResAlbums.isNotEmpty()) {
             item {
-                Text("Albums", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(end = 4.dp)
-                ) {
-                    items(
-                        albums.take(12),
-                        key = { it.name + "\u0000" + it.artist },
-                        contentType = { "album" }
-                    ) { a ->
-                        Column(
-                            Modifier.width(128.dp).clickable { onOpenAlbum(a) }
-                        ) {
-                            ArtImage(a.name, a.artist, artVersion,
-                                     Modifier.fillMaxWidth().aspectRatio(1f))
-                            Spacer(Modifier.height(6.dp))
-                            Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                 style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    HomeSectionTitle("Hi-Res Masters", "Above 16-bit or 48 kHz")
+                    Spacer(Modifier.height(10.dp))
+                    HomeAlbumCarousel(
+                        albums = hiResAlbums,
+                        artVersion = artVersion,
+                        badgeFor = ::hiResBadge,
+                        onOpenAlbum = onOpenAlbum
+                    )
+                    Spacer(Modifier.height(24.dp))
                 }
-                Spacer(Modifier.height(20.dp))
+            }
+        }
+
+        // ---- forgotten gems ----
+        if (quickPicks.isNotEmpty()) {
+            item {
+                Column(Modifier.padding(horizontal = 20.dp)) {
+                    HomeSectionTitle("Forgotten gems", "Quick picks from your collection")
+                    Spacer(Modifier.height(10.dp))
+                    HomeAlbumCarousel(
+                        albums = quickPicks,
+                        artVersion = artVersion,
+                        badgeFor = { null },
+                        onOpenAlbum = onOpenAlbum
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        "${plural(tracks.size, "track")}  ·  " +
+                        plural(albums.size, "album"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
+        } else if (albums.isEmpty()) {
+            item {
                 Text(
-                    "${plural(albums.sumOf { it.tracks.size }, "track")}  ·  " +
-                    plural(albums.size, "album"),
+                    "No music yet. Choose a folder in Settings to build your library.",
+                    Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/* -------------------------------------------------- home components */
+
+@Composable
+private fun HomeSectionTitle(title: String, subtitle: String? = null) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        if (subtitle != null) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeQuickTile(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    tint: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 2.dp,
+        modifier = modifier.clickable { onClick() }
+    ) {
+        Row(
+            Modifier.padding(horizontal = 11.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(32.dp).clip(CircleShape).background(tint.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+            }
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Text(
+                    subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.height(12.dp))
             }
         }
     }
 }
 
 @Composable
-private fun ShortcutTile(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, modifier = modifier.padding(0.dp)) {
-        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis,
-             style = MaterialTheme.typography.labelLarge)
+private fun HomeHeroCard(
+    title: String,
+    artist: String,
+    album: String,
+    positionMs: Long,
+    durationMs: Long,
+    playing: Boolean,
+    paused: Boolean,
+    artVersion: Int,
+    onAction: () -> Unit
+) {
+    val accent = rememberArtAccent(album, artist, enabled = true)
+    val base = accent?.primary ?: MaterialTheme.colorScheme.primary
+    val second = accent?.secondary ?: MaterialTheme.colorScheme.secondary
+    val dur = durationMs.coerceAtLeast(1L)
+    val pos = positionMs.coerceIn(0L, dur)
+    val frac = if (durationMs > 0L) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f
+    val status = when {
+        playing -> "Now playing"
+        paused -> "Paused"
+        else -> "Resume"
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { onAction() },
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF101017))
+    ) {
+        Box(Modifier.fillMaxWidth().height(200.dp)) {
+            // softened cover backdrop, then an art-tinted scrim for legibility
+            if (album.isNotEmpty() || artist.isNotEmpty()) {
+                ArtImage(
+                    album, artist, artVersion,
+                    Modifier.fillMaxSize().blur(34.dp).alpha(0.55f)
+                )
+            }
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.linearGradient(
+                        listOf(
+                            base.copy(alpha = 0.78f),
+                            second.copy(alpha = 0.42f),
+                            Color(0xFF0B0B10).copy(alpha = 0.94f)
+                        )
+                    )
+                )
+            )
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.35f))
+                    )
+                )
+            )
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ArtImage(album = album, artist = artist, artVersion = artVersion,
+                             modifier = Modifier.size(84.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "CONTINUE LISTENING",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.72f)
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White
+                        )
+                        Text(
+                            listOf(artist, album).filter { it.isNotEmpty() }
+                                .joinToString("  ·  "),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.76f)
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            status,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.82f)
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Box(
+                            Modifier.fillMaxWidth().height(3.dp).clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.20f))
+                        ) {
+                            Box(
+                                Modifier.fillMaxWidth(frac).fillMaxHeight()
+                                    .clip(CircleShape).background(Color.White)
+                            )
+                        }
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            "${fmtTime(positionMs)} / ${fmtTime(durationMs)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.66f)
+                        )
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    FilledIconButton(
+                        onClick = onAction,
+                        modifier = Modifier.size(50.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = Color.White,
+                            contentColor = Color(0xFF101017)
+                        )
+                    ) {
+                        Icon(
+                            if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (playing) "Pause" else "Resume",
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeAlbumCarousel(
+    albums: List<LibAlbum>,
+    artVersion: Int,
+    badgeFor: (LibAlbum) -> String?,
+    onOpenAlbum: (LibAlbum) -> Unit
+) {
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(end = 4.dp)
+    ) {
+        items(
+            albums,
+            key = { it.name + "\u0000" + it.artist },
+            contentType = { "album" }
+        ) { a ->
+            Column(Modifier.width(136.dp).clickable { onOpenAlbum(a) }) {
+                Box(Modifier.fillMaxWidth().aspectRatio(1f)) {
+                    ArtImage(a.name, a.artist, artVersion, Modifier.fillMaxSize())
+                    val badge = badgeFor(a)
+                    if (badge != null) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color.Black.copy(alpha = 0.64f),
+                            modifier = Modifier.align(Alignment.TopEnd).padding(6.dp)
+                        ) {
+                            Text(
+                                badge,
+                                Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    a.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    a.artist.ifEmpty { "Unknown artist" },
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 
@@ -1021,8 +1352,11 @@ fun OutputScreen(
             }
 
             if (hwVol != null) {
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Column(Modifier.weight(1f)) {
                         Text("Hardware volume", style = MaterialTheme.typography.bodyLarge)
                         Text(
@@ -1035,11 +1369,18 @@ fun OutputScreen(
                 }
             }
 
-            Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Keep the slider in its own band so the switch above can never be
+            // hit by a slider drag, and vice versa.
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text("vol", style = MaterialTheme.typography.labelMedium)
-                Slider(value = volume, onValueChange = onVolume,
-                       modifier = Modifier.weight(1f).padding(horizontal = 10.dp))
+                Slider(
+                    value = volume, onValueChange = onVolume,
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp).height(40.dp)
+                )
                 Text("${(volume * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
             }
 
@@ -1126,8 +1467,26 @@ fun SettingsScreen(
     onClearCache: () -> Unit,
     themeMode: ThemeMode,
     onThemeMode: (ThemeMode) -> Unit,
+    dynamicMaterial: Boolean,
+    onDynamicMaterial: (Boolean) -> Unit,
+    amoled: Boolean,
+    onAmoled: (Boolean) -> Unit,
     dynamicColors: Boolean,
     onDynamicColors: (Boolean) -> Unit,
+    excludedFolders: Set<String>,
+    folderOptions: List<String>,
+    onToggleFolder: (String) -> Unit,
+    autoPlayDac: Boolean,
+    onAutoPlayDac: (Boolean) -> Unit,
+    keepScreenOn: Boolean,
+    onKeepScreenOn: (Boolean) -> Unit,
+    smartAutoplay: Boolean,
+    onSmartAutoplay: (Boolean) -> Unit,
+    swipeUpMini: Boolean,
+    onSwipeUpMini: (Boolean) -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+    backupMessage: String?,
     outputBits: Int,
     onOutputBits: (Int) -> Unit,
     srcQuality: Int,
@@ -1143,19 +1502,56 @@ fun SettingsScreen(
     onSleepMinutes: (Int) -> Unit,
     skipShort: Boolean,
     onSkipShort: (Boolean) -> Unit,
-    version: String = "1.0.1"
+    version: String = "1.0.2"
 ) {
+    var showFolders by remember { mutableStateOf(false) }
+
+    if (showFolders) {
+        AlertDialog(
+            onDismissRequest = { showFolders = false },
+            confirmButton = {
+                TextButton(onClick = { showFolders = false }) { Text("Done") }
+            },
+            title = { Text("Excluded folders") },
+            text = {
+                if (folderOptions.isEmpty()) {
+                    Text("No folders scanned yet.")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 400.dp)) {
+                        items(folderOptions) { f ->
+                            Row(
+                                Modifier.fillMaxWidth().clickable { onToggleFolder(f) }
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = excludedFolders.contains(f),
+                                    onCheckedChange = { onToggleFolder(f) }
+                                )
+                                Text(
+                                    f,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 20.dp),
-        contentPadding = PaddingValues(bottom = 24.dp)
+        contentPadding = PaddingValues(bottom = 28.dp)
     ) {
         item {
             Spacer(Modifier.height(24.dp))
             Text("Settings", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(18.dp))
 
-            /* ------------------------------------------------- audio engine */
-            SettingsSection("Audio engine") {
+            /* ------------------------------------------------ audio & usb dac */
+            SettingsSection("Audio & USB DAC") {
                 SettingTitle(
                     "Output bit depth",
                     when (outputBits) {
@@ -1167,11 +1563,7 @@ fun SettingsScreen(
                 OptionChips(
                     options = listOf("Auto (Match Source)", "24-bit", "16-bit"),
                     selected = when (outputBits) { 24 -> 1; 16 -> 2; else -> 0 },
-                    onSelect = {
-                        onOutputBits(
-                            when (it) { 1 -> 24; 2 -> 16; else -> 0 }
-                        )
-                    }
+                    onSelect = { onOutputBits(when (it) { 1 -> 24; 2 -> 16; else -> 0 }) }
                 )
                 Spacer(Modifier.height(14.dp))
 
@@ -1198,43 +1590,86 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(8.dp))
 
-                SwitchRow(
-                    "TPDF dither",
-                    "Triangular dither in the native packer, pre-USB",
-                    dither, onDither
-                )
+                SwitchRow("TPDF dither", "Triangular dither in the native packer", dither, onDither)
                 HorizontalDivider()
-                SwitchRow(
-                    "Gapless playback",
-                    "Continue into the next track when the format matches",
-                    gapless, onGapless
-                )
+                SwitchRow("Gapless playback", "Continue into the next track when the format matches", gapless, onGapless)
                 HorizontalDivider()
-                SwitchRow(
-                    "Auto-reclaim USB DAC on replug",
-                    "Resume bit-perfect output after the DAC returns",
-                    autoReclaim, onAutoReclaim
-                )
+                SwitchRow("Auto-reclaim USB DAC on replug", "Resume bit-perfect output after the DAC returns", autoReclaim, onAutoReclaim)
+                HorizontalDivider()
+                SwitchRow("Skip short tracks (< 30s)", "Ignore stingers and interludes when scanning", skipShort, onSkipShort)
             }
 
             Spacer(Modifier.height(18.dp))
 
-            /* --------------------------------------------------- sleep timer */
-            SettingsSection("Sleep timer") {
+            /* ------------------------------------------------------- appearance */
+            SettingsSection("Appearance") {
+                SettingTitle("Theme", "System follows the phone's dark mode")
+                OptionChips(
+                    options = listOf("System", "Dark", "Light"),
+                    selected = when (themeMode) {
+                        ThemeMode.SYSTEM -> 0; ThemeMode.DARK -> 1; ThemeMode.LIGHT -> 2
+                    },
+                    onSelect = {
+                        onThemeMode(when (it) { 1 -> ThemeMode.DARK; 2 -> ThemeMode.LIGHT; else -> ThemeMode.SYSTEM })
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("Material You dynamic color", "Use the wallpaper palette instead of the VCHiFiMP scheme", dynamicMaterial, onDynamicMaterial)
+                HorizontalDivider()
+                SwitchRow("AMOLED pitch black", "Pure #000000 containers while the dark theme is active", amoled, onAmoled)
+                HorizontalDivider()
+                SwitchRow("Dynamic album-art colors", "Tint Now Playing and the spectrum from the cover", dynamicColors, onDynamicColors)
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            /* ---------------------------------------------------- local library */
+            SettingsSection("Local library") {
+                SettingTitle("Included music", folderLabel.ifEmpty { "No folder selected" })
+                Text(
+                    plural(trackCount, "track") + " in the current filter",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onChooseFolder) { Text("Choose folder") }
+                    Button(onClick = onRescan) { Text("Rescan") }
+                }
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = { showFolders = true }) {
+                    Text(
+                        if (excludedFolders.isEmpty()) "Excluded folders"
+                        else "Excluded folders (${excludedFolders.size})"
+                    )
+                }
+                TextButton(onClick = onClearCache) { Text("Clear artwork cache") }
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            /* ------------------------------------------------ playback & gestures */
+            SettingsSection("Playback & gestures") {
+                SwitchRow("Auto-play on DAC connect", "Resume the paused track when the DAC comes back", autoPlayDac, onAutoPlayDac)
+                HorizontalDivider()
+                SwitchRow("Smart autoplay", "Append a shuffled batch when the queue ends (Repeat off)", smartAutoplay, onSmartAutoplay)
+                HorizontalDivider()
+                SwitchRow("Keep screen on while playing", "Only while audio is actually running", keepScreenOn, onKeepScreenOn)
+                HorizontalDivider()
+                SwitchRow("Swipe up on mini player", "Expand Now Playing with a swipe, like swipe-down to close", swipeUpMini, onSwipeUpMini)
+                HorizontalDivider()
+
                 val left = sleepRemainingMs ?: 0L
-                val running = left > 0
                 SettingTitle(
-                    "Pause after",
-                    if (running) {
-                        val s = (left / 1000).toInt()
-                        "Remaining %d:%02d".format(s / 60, s % 60)
+                    "Sleep timer",
+                    if (left > 0) {
+                        val sec = (left / 1000).toInt()
+                        "Remaining %d:%02d".format(sec / 60, sec % 60)
                     } else "Off — playback continues"
                 )
                 OptionChips(
                     options = listOf("Off", "15 min", "30 min", "45 min", "60 min"),
-                    selected = when (sleepMinutes) {
-                        15 -> 1; 30 -> 2; 45 -> 3; 60 -> 4; else -> 0
-                    },
+                    selected = when (sleepMinutes) { 15 -> 1; 30 -> 2; 45 -> 3; 60 -> 4; else -> 0 },
                     onSelect = {
                         onSleepMinutes(
                             when (it) { 1 -> 15; 2 -> 30; 3 -> 45; 4 -> 60; else -> 0 }
@@ -1245,69 +1680,35 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(18.dp))
 
-            /* ------------------------------------------- library & appearance */
-            SettingsSection("Library & appearance") {
-                SettingTitle("Theme", "System follows the phone's dark mode")
-                OptionChips(
-                    options = listOf("System", "Dark", "Light"),
-                    selected = when (themeMode) {
-                        ThemeMode.SYSTEM -> 0; ThemeMode.DARK -> 1; ThemeMode.LIGHT -> 2
-                    },
-                    onSelect = {
-                        onThemeMode(
-                            when (it) {
-                                1 -> ThemeMode.DARK
-                                2 -> ThemeMode.LIGHT
-                                else -> ThemeMode.SYSTEM
-                            }
-                        )
-                    }
-                )
-                Spacer(Modifier.height(8.dp))
-
-                SwitchRow(
-                    "Dynamic album-art colors",
-                    "Tint Now Playing and the spectrum from the cover",
-                    dynamicColors, onDynamicColors
-                )
-                HorizontalDivider()
-                SwitchRow(
-                    "Skip short tracks (< 30s)",
-                    "Ignore stingers and interludes when scanning",
-                    skipShort, onSkipShort
-                )
-                HorizontalDivider()
-
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    folderLabel.ifEmpty { "No folder selected" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    plural(trackCount, "track") + " cached",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            /* ---------------------------------------------------- backup/restore */
+            SettingsSection("Backup & restore") {
+                SettingTitle(
+                    "vchifimp_backup.json",
+                    "Preferences, excluded folders, favourites and the last track"
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onChooseFolder) { Text("Choose folder") }
-                    OutlinedButton(onClick = onRescan) { Text("Rescan") }
+                    Button(onClick = onExportBackup) { Text("Export JSON") }
+                    OutlinedButton(onClick = onImportBackup) { Text("Import JSON") }
                 }
-                Spacer(Modifier.height(6.dp))
-                TextButton(onClick = onClearCache) { Text("Clear artwork cache") }
+                if (!backupMessage.isNullOrEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        backupMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
             }
 
             Spacer(Modifier.height(18.dp))
 
-            /* --------------------------------------------------------- about */
             SettingsSection("About") {
                 Text("VCHiFiMP  v$version", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Bit-perfect USB audio · native C engine over raw usbfs · " +
-                    "libsamplerate (BSD-2) for rate conversion · 24-bit/16-bit UAC1 output",
+                    "libsamplerate (BSD-2) · 24-bit/16-bit UAC1 output",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1363,9 +1764,7 @@ private fun OptionChips(
             FilterChip(
                 selected = i == selected,
                 onClick = { onSelect(i) },
-                label = {
-                    Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             )
         }
     }
