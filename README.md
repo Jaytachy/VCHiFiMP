@@ -170,9 +170,10 @@ Android: open `android/` in Android Studio and build. Requires NDK and CMake.
   The exclusive/bit-perfect path is unaffected.
 - **Auto depth depends on metadata.** When neither the library scan nor
   `MediaExtractor` reports a bit depth, the track falls back to 24-bit.
-- **24-bit → 16-bit alt switching in place** is implemented (gapless breaks
-  into `uae_switch_format`), verified in logs; a full on-device A/B of the
-  audible switch is still pending a DAC session.
+- **24-bit ↔ 16-bit alt switching in place** is implemented (gapless breaks
+  into `uae_switch_format`) and verified on the Jieli DAC: `uae: switched to
+  44100 Hz / 16-bit (alt 1, maxpkt 384)` after a 24-bit track, and back to alt 2
+  / maxpkt 576 on the next 24-bit track, with no engine teardown.
 
 ## Next
 
