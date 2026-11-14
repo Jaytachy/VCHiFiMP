@@ -96,6 +96,8 @@ struct uae {
     int ctrl_iface;
     int ifaces[16];
     int nifaces;
+    struct uae_alt alts[MAX_ALTS];
+    int nalts;
 
     volatile int running;
     volatile int failed;
@@ -457,6 +459,8 @@ struct uae *uae_open(int fd, int rate, int bits)
 
     struct uae_alt alts[MAX_ALTS];
     int nalts = parse_config(cfg, total, alts, MAX_ALTS);
+    e->nalts = nalts;
+    memcpy(e->alts, alts, sizeof(alts));
 
     struct uae_alt *pick = NULL;
     for (int pass = 0; pass < 2 && !pick; pass++) {
@@ -630,6 +634,82 @@ void uae_set_volume(struct uae *e, float v)
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     e->volume = v;
+}
+
+/**
+ * Switch the live session to another rate / bit depth without releasing the
+ * interface. Returns 0 on success. The caller must have stopped writing first.
+ */
+int uae_switch_format(struct uae *e, int rate, int bits)
+{
+    if (!e || !e->running) return -1;
+
+    struct uae_alt *pick = NULL;
+    for (int pass = 0; pass < 2 && !pick; pass++) {
+        for (int i = 0; i < e->nalts; i++) {
+            struct uae_alt *a = &e->alts[i];
+            if (!a->ep || (a->ep & 0x80) || !a->channels) continue;
+            if (!alt_has_rate(a, (unsigned)rate)) continue;
+            if (pass == 0 && a->subframe != ((bits == 24) ? 3 : 2)) continue;
+            pick = a;
+            break;
+        }
+    }
+    if (!pick) return -2;
+
+    /* stop the pump; it frees its URBs on the way out */
+    e->running = 0;
+    pthread_mutex_lock(&e->lock);
+    pthread_cond_broadcast(&e->can_read);
+    pthread_cond_broadcast(&e->can_write);
+    pthread_mutex_unlock(&e->lock);
+    if (e->started) {
+        pthread_join(e->thread, NULL);
+        e->started = 0;
+    }
+
+    pthread_mutex_lock(&e->lock);
+    e->head = e->tail = 0;
+    e->filled = 0;
+    pthread_cond_broadcast(&e->can_write);
+    pthread_mutex_unlock(&e->lock);
+
+    e->frames_done = 0;
+    e->rendered = 0;
+    e->gain = 0.0f;
+    e->ending = 0;
+    e->eos = 0;
+    e->failed = 0;
+
+    struct usbdevfs_setinterface si;
+    si.interface = (unsigned)pick->iface;
+    si.altsetting = (unsigned)pick->altset;
+    if (ioctl(e->fd, USBDEVFS_SETINTERFACE, &si) < 0)
+        return -3;
+
+    unsigned char fr[3] = { (unsigned char)(rate & 0xff),
+                            (unsigned char)((rate >> 8) & 0xff),
+                            (unsigned char)((rate >> 16) & 0xff) };
+    (void)ctrl(e->fd, 0x22, 0x01, 0x0100, (uint16_t)pick->ep, 3, fr);
+
+    e->iface    = pick->iface;
+    e->alt      = pick->altset;
+    e->ep       = pick->ep;
+    e->maxpkt   = pick->maxpkt;
+    e->channels = pick->channels;
+    e->bpf      = pick->channels * pick->subframe;
+    e->rate     = rate;
+
+    LOGI("uae: switched to %d Hz / %d-bit (alt %d, maxpkt %d)",
+         rate, bits, e->alt, e->maxpkt);
+
+    e->running = 1;
+    if (pthread_create(&e->thread, NULL, pump, e) != 0) {
+        e->running = 0;
+        return -4;
+    }
+    e->started = 1;
+    return 0;
 }
 
 uint64_t uae_frames_played(struct uae *e)

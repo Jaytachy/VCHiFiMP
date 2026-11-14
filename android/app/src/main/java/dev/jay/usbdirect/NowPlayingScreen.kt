@@ -285,7 +285,30 @@ fun NowPlayingScreen(
                     Slider(
                         value = volume,
                         onValueChange = onVolume,
-                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                        thumb = {
+                            Box(
+                                Modifier.size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                        },
+                        track = { state ->
+                            Box(
+                                Modifier.fillMaxWidth().height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                            .copy(alpha = 0.28f)
+                                    )
+                            ) {
+                                Box(
+                                    Modifier.fillMaxWidth(state.value.coerceIn(0f, 1f))
+                                        .fillMaxHeight()
+                                        .background(MaterialTheme.colorScheme.primary)
+                                )
+                            }
+                        }
                     )
                     Text(
                         "${(volume * 100).toInt()}%",

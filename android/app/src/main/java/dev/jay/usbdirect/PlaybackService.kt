@@ -55,6 +55,7 @@ data class TransportState(
     val queueSize: Int = 0,
     val shuffle: Boolean = false,
     val repeat: RepeatMode = RepeatMode.OFF,
+    val missingUri: String? = null,
     val error: String? = null
 )
 
@@ -123,6 +124,9 @@ class PlaybackService : Service() {
                 main.post {
                     if (!suppressFinish && _state.value.playing) advanceOrStop()
                 }
+            }
+            onMissing = { uri ->
+                main.post { handleMissing(uri.toString()) }
             }
             onError = { msg ->
                 Log.e("VCProbe", "player error: $msg")
@@ -280,7 +284,8 @@ class PlaybackService : Service() {
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
             positionMs = fromMs, durationMs = t.durationMs, error = null,
-            artist = t.artist, album = t.album, codec = codec, format = ""
+            artist = t.artist, album = t.album, codec = codec, format = "",
+            missingUri = null
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
                                    t.durationMs, codec))
@@ -356,6 +361,23 @@ class PlaybackService : Service() {
 
     /** true = take the device over (bit-perfect). false = Android's mixer. */
     fun setExclusive(on: Boolean) { exclusive = on }
+
+    /** Drop a vanished file from the queue and keep playing around it. */
+    private fun handleMissing(uriString: String) {
+        val at = queue.indexOfFirst { it.uri.toString() == uriString }
+        queue.removeAll { it.uri.toString() == uriString }
+        originalQueue.removeAll { it.uri.toString() == uriString }
+        _queueFlow.value = queue.toList()
+        _state.value = _state.value.copy(
+            queueSize = queue.size, missingUri = uriString,
+            error = "file missing — removed from library"
+        )
+        if (queue.isEmpty()) stop()
+        else {
+            val next = (if (at >= 0) at else index).coerceIn(0, queue.lastIndex)
+            playAt(next)
+        }
+    }
 
     fun setVolume(v: Float) {
         volume = v.coerceIn(0f, 1f)

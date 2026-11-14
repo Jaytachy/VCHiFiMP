@@ -71,6 +71,14 @@ class MainActivity : ComponentActivity() {
             // needed so Home's "continue listening" can start on a cold launch
             audioDevice()?.let { d -> if (usbManager.hasPermission(d)) svc.setDevice(d, 24, volume) }
             lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
+            lifecycleScope.launch {
+                var lastMissing: String? = null
+                svc.state.collect { st ->
+                    val m = st.missingUri
+                    if (m == null) { lastMissing = null; return@collect }
+                    if (m != lastMissing) { lastMissing = m; removeFromLibrary(m) }
+                }
+            }
             lifecycleScope.launch { svc.queueFlow.collect { queueTracks = it } }
 
             intent?.getStringExtra("debugfile")?.let { path ->
@@ -419,6 +427,19 @@ class MainActivity : ComponentActivity() {
                 d.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_AUDIO
             }
         }
+
+    /** A track vanished on disk: drop it from the in-memory library and cache. */
+    private fun removeFromLibrary(uriString: String) {
+        val before = tracks.size
+        tracks = tracks.filterNot { it.uri.toString() == uriString }
+        if (tracks.size == before) return
+        albums = LibraryScanner.albums(tracks)
+        getPreferences(MODE_PRIVATE).getString("tree", null)?.let {
+            LibraryStore.save(this, Uri.parse(it), tracks)
+        }
+        scanState = "${tracks.size} tracks, ${albums.size} albums"
+        Log.i("VCProbe", "removed missing track from cache: $uriString")
+    }
 
     /* ------------------------------------------------------------- scan */
 

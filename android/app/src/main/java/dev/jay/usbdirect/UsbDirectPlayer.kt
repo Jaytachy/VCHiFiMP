@@ -37,10 +37,12 @@ class UsbDirectPlayer(private val context: Context) {
     var onInfo: ((String) -> Unit)? = null
     var onProgress: ((positionMs: Long) -> Unit)? = null
     var onFormat: ((rate: Int, bits: Int) -> Unit)? = null
+    var onMissing: ((Uri) -> Unit)? = null
 
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
     @Volatile private var session = 0
+    private var activeDeviceId = -1
     private var thread: Thread? = null
     private var connection: UsbDeviceConnection? = null
     private var engine: UsbAudioEngine? = null
@@ -149,17 +151,47 @@ class UsbDirectPlayer(private val context: Context) {
 
     private fun startInternal(device: UsbDevice, rate: Int, bits: Int, volume: Float,
                               body: (UsbAudioEngine) -> Unit) {
-        stop()
+        // Fast path: same DAC, interface still ours, and it supports the new
+        // format. Switch rate/alt in place instead of a full teardown.
+        val live = engine
+        if (live != null && connection != null && device.deviceId == activeDeviceId &&
+            live.switchFormat(rate, bits) == 0
+        ) {
+            Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
+            val gen = ++session
+            running = true
+            thread = Thread {
+                var completed = false
+                try {
+                    analyzer.start()
+                    live.setVolume(volume)
+                    body(live)
+                    completed = true
+                } catch (t: Throwable) {
+                    Log.e("VCProbe", "decode failed: ${t.message}", t)
+                    if (running) onError?.invoke(t.message ?: t.toString())
+                } finally {
+                    if (!completed || !running) closeEngine()
+                    running = false
+                    if (gen == session) onFinished?.invoke()
+                }
+            }.also { it.isDaemon = true; it.start() }
+            return
+        }
+
+        closeEngine()
         val gen = ++session
         running = true
         thread = Thread {
             var conn: UsbDeviceConnection? = null
             var eng: UsbAudioEngine? = null
+            var completed = false
             try {
                 val mgr = context.getSystemService(Context.USB_SERVICE) as UsbManager
                 conn = mgr.openDevice(device)
                     ?: throw IllegalStateException("openDevice failed - USB permission?")
                 connection = conn
+                activeDeviceId = device.deviceId
 
                 eng = UsbAudioEngine.open(conn.fileDescriptor, rate, bits)
                 if (!eng.isOk) {
@@ -174,32 +206,39 @@ class UsbDirectPlayer(private val context: Context) {
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
                 onInfo?.invoke("engine: ${rate} Hz / $bits-bit")
                 body(eng)
+                completed = true
             } catch (t: Throwable) {
                 Log.e("VCProbe", "engine failed: ${t.message}", t)
                 if (running) onError?.invoke(t.message ?: t.toString())
             } finally {
-                eng?.close()
-                engine = null
-                conn?.close()
-                connection = null
+                // A natural end keeps the engine for the next track; only a
+                // deliberate stop or a failure releases the device.
+                if (!completed || !running) {
+                    eng?.close()
+                    if (engine === eng) engine = null
+                    conn?.close()
+                    if (connection === conn) connection = null
+                    activeDeviceId = -1
+                }
                 running = false
-                // Only the session that is still current may report completion:
-                // a deliberate stop has already moved on, and letting the old
-                // thread fire onFinished made the service skip a track from
-                // inside the player's own stop().
                 if (gen == session) onFinished?.invoke()
             }
         }.also { it.isDaemon = true; it.start() }
+    }
+
+    private fun closeEngine() {
+        engine?.close()
+        engine = null
+        connection?.close()
+        connection = null
+        activeDeviceId = -1
     }
 
     fun stop() {
         session++            // invalidate any in-flight completion callback
         analyzer.stop()
         running = false
-        engine?.close()
-        engine = null
-        connection?.close()
-        connection = null
+        closeEngine()
 
         val t = thread
         thread = null
@@ -243,12 +282,21 @@ class UsbDirectPlayer(private val context: Context) {
 
     private fun decodeLoop(uri: Uri, target: PcmTarget, outRate: Int, startMs: Long) {
         val extractor = MediaExtractor()
-        if (uri.scheme == "file") {
-            extractor.setDataSource(uri.path!!)
-        } else {
-            context.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
-                extractor.setDataSource(pfd.fileDescriptor)
+        try {
+            if (uri.scheme == "file") {
+                extractor.setDataSource(uri.path!!)
+            } else {
+                context.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
+                    extractor.setDataSource(pfd.fileDescriptor)
+                }
             }
+        } catch (t: Throwable) {
+            // File deleted, moved, or the SAF grant is gone: tell the service
+            // instead of failing silently.
+            Log.w("VCProbe", "cannot open $uri: ${t.message}")
+            runCatching { extractor.release() }
+            onMissing?.invoke(uri)
+            return
         }
 
         var track = -1

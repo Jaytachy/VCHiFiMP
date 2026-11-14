@@ -18,6 +18,7 @@ void uae_set_volume(struct uae *e, float v);   /* 0.0 .. 1.0 */
 void uae_set_ppm(struct uae *e, float ppm);     /* free-running clock trim */
 void uae_set_eos(struct uae *e);                /* producer reached end of stream */
 uint64_t uae_frames_played(struct uae *e);  /* frames the device consumed */
+int  uae_switch_format(struct uae *e, int rate, int bits);  /* 0 = ok */
 void uae_close(struct uae *e);
 
 #endif

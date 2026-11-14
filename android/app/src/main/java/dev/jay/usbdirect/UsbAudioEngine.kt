@@ -28,6 +28,10 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetPpm(handle, ppm)
     }
 
+    /** Re-target the live session (rate + bit depth) without releasing it. */
+    fun switchFormat(rate: Int, bits: Int): Int =
+        if (handle != 0L) nativeSwitchFormat(handle, rate, bits) else -1
+
     /** Frames the device has actually consumed (completed URBs), not queued. */
     fun framesPlayed(): Long = if (handle != 0L) nativeFramesPlayed(handle) else 0L
 
@@ -49,6 +53,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeEos(h: Long)
     private external fun nativeFramesPlayed(h: Long): Long
+    private external fun nativeSwitchFormat(h: Long, rate: Int, bits: Int): Int
     private external fun nativeClose(h: Long)
 
     companion object {
