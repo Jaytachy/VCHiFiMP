@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
     private var volume by mutableStateOf(0.2f)
     private var exclusive by mutableStateOf(true)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
+    private var showAnalyzer by mutableStateOf(false)
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
     private var pendingDebugTrack: Track? = null
@@ -139,7 +140,10 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
                     val album = openAlbum
-                    if (album != null) {
+                    if (showAnalyzer) {
+                        BackHandler { showAnalyzer = false }
+                        AnalyzerScreen(service?.player?.analyzer) { showAnalyzer = false }
+                    } else if (album != null) {
                         BackHandler { openAlbum = null }
                         AlbumScreen(album) { openAlbum = null }
                     } else {
@@ -169,7 +173,11 @@ class MainActivity : ComponentActivity() {
         Scaffold(
             topBar = {
                 Column(Modifier.padding(16.dp)) {
-                    Text("VCHiFiMP", style = MaterialTheme.typography.headlineSmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("VCHiFiMP", style = MaterialTheme.typography.headlineSmall,
+                             modifier = Modifier.weight(1f))
+                        TextButton(onClick = { showAnalyzer = true }) { Text("Spectrum") }
+                    }
                     Text(
                         if (transport.playing) "playing  ${transport.title}"
                         else scanState.ifEmpty { usbState },

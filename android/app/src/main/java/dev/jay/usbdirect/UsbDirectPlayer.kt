@@ -43,6 +43,9 @@ class UsbDirectPlayer(private val context: Context) {
     private var connection: UsbDeviceConnection? = null
     private var engine: UsbAudioEngine? = null
 
+    /** Analyser taps the post-volume float stream, before dither/packing. */
+    val analyzer = AudioAnalyzer()
+
     val isRunning: Boolean get() = running
 
     fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float,
@@ -98,6 +101,7 @@ class UsbDirectPlayer(private val context: Context) {
                     .build()
                 track.setPreferredDevice(dev)
                 track.play()
+                analyzer.start()
                 Log.i("VCProbe", "mixer sink open: " + rate + " Hz")
                 onInfo?.invoke("mixer: ${rate} Hz")
                 decodeLoop(uri, MixerTarget(track) { mixerVolume }, rate, startMs)
@@ -161,6 +165,7 @@ class UsbDirectPlayer(private val context: Context) {
                 engine = eng
                 eng.setVolume(volume)
 
+                analyzer.start()
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
                 onInfo?.invoke("engine: ${rate} Hz / $bits-bit")
                 body(eng)
@@ -179,6 +184,7 @@ class UsbDirectPlayer(private val context: Context) {
     }
 
     fun stop() {
+        analyzer.stop()
         running = false
         engine?.close()
         engine = null
@@ -251,7 +257,8 @@ class UsbDirectPlayer(private val context: Context) {
             extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
             Log.i("VCProbe", "seek to " + startMs + " ms (sampleTime=" + extractor.sampleTime + ")")
         }
-        val sink = PcmSink(target, srcRate, outRate, srcCh, startMs, onProgress)
+        val sink = PcmSink(target, srcRate, outRate, srcCh, startMs, onProgress,
+            tap = { b, n -> analyzer.offer(b, n, mixerVolume) })
 
         if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
             decodeRaw(extractor, sink, format)
@@ -380,7 +387,8 @@ class UsbDirectPlayer(private val context: Context) {
         private val outRate: Int,
         private val srcCh: Int,
         private val startMs: Long,
-        private val progress: ((Long) -> Unit)?
+        private val progress: ((Long) -> Unit)?,
+        private val tap: ((FloatBuffer, Int) -> Unit)?
     ) {
         private var lastReportMs = 0L
         private var framesOut = 0L
@@ -457,6 +465,7 @@ class UsbDirectPlayer(private val context: Context) {
             val frames = direct.position() / 2
             if (frames == 0) return
             direct.flip()
+            tap?.invoke(direct, frames)
             directBytes.position(0)
             directBytes.limit(frames * 8)
             target.write(direct, directBytes, frames)
