@@ -38,6 +38,10 @@ class UsbDirectPlayer(private val context: Context) {
     var onProgress: ((positionMs: Long) -> Unit)? = null
     var onFormat: ((rate: Int, bits: Int) -> Unit)? = null
     var onMissing: ((Uri) -> Unit)? = null
+    /** Next track for seamless continuation, or null to end normally. */
+    var gaplessProvider: (() -> Pair<Int, Track>?)? = null
+    /** Fires once the new track is actually reaching the DAC. */
+    var onBoundary: ((Int) -> Unit)? = null
 
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
@@ -150,6 +154,23 @@ class UsbDirectPlayer(private val context: Context) {
         } finally {
             ex.release()
         }
+    }
+
+    private fun probeChannels(uri: Uri): Int {
+        val ex = MediaExtractor()
+        return try {
+            if (uri.scheme == "file") ex.setDataSource(uri.path!!)
+            else context.contentResolver.openFileDescriptor(uri, "r")!!.use {
+                ex.setDataSource(it.fileDescriptor)
+            }
+            var c = 0
+            for (i in 0 until ex.trackCount) {
+                val f = ex.getTrackFormat(i)
+                val m = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (m.startsWith("audio/")) { c = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT); break }
+            }
+            c
+        } catch (t: Throwable) { 0 } finally { ex.release() }
     }
 
     /** Plays a 1 kHz tone straight from native, no decoding involved. */
@@ -299,60 +320,89 @@ class UsbDirectPlayer(private val context: Context) {
 
     private fun decodeLoop(uri: Uri, target: PcmTarget, outRate: Int, startMs: Long) {
         Log.i("VCProbe", "decode begin")
-        val extractor = MediaExtractor()
-        try {
-            if (uri.scheme == "file") {
-                extractor.setDataSource(uri.path!!)
-            } else {
-                context.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
-                    extractor.setDataSource(pfd.fileDescriptor)
-                }
-            }
-        } catch (t: Throwable) {
-            // File deleted, moved, or the SAF grant is gone: tell the service
-            // instead of failing silently.
-            Log.w("VCProbe", "cannot open $uri: ${t.message}")
-            runCatching { extractor.release() }
-            onMissing?.invoke(uri)
-            return
-        }
-
-        var track = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val f = extractor.getTrackFormat(i)
-            val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("audio/")) { track = i; format = f; break }
-        }
-        if (track < 0 || format == null) throw IllegalStateException("no audio track")
-        extractor.selectTrack(track)
-
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val srcRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val srcCh = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-        onInfo?.invoke("$mime  $srcRate Hz  ${srcCh}ch  ->  $outRate Hz")
-
-        Log.i("VCProbe", "track mime=" + mime + " rate=" + srcRate + " ch=" + srcCh)
-        if (startMs > 0) {
-            extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-            Log.i("VCProbe", "seek to " + startMs + " ms (sampleTime=" + extractor.sampleTime + ")")
-        }
         analyzer.setSampleRate(outRate)
-        val sink = PcmSink(target, srcRate, outRate, srcCh, startMs, onProgress,
-            tap = { b, n ->
-                // keep the visualiser aligned with what is actually audible
-                analyzer.delayFrames = target.bufferedFrames()
-                analyzer.offer(b, n, mixerVolume)
-            })
+        val myGen = session
 
-        if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
-            decodeRaw(extractor, sink, format)
-        } else {
-            decodeCodec(extractor, format, track, sink)
+        var currentUri = uri
+        var currentStart = startMs
+        var sink: PcmSink? = null
+
+        while (running && session == myGen) {
+            val extractor = MediaExtractor()
+            try {
+                if (currentUri.scheme == "file") {
+                    extractor.setDataSource(currentUri.path!!)
+                } else {
+                    context.contentResolver.openFileDescriptor(currentUri, "r")!!.use { pfd ->
+                        extractor.setDataSource(pfd.fileDescriptor)
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w("VCProbe", "cannot open $currentUri: ${t.message}")
+                runCatching { extractor.release() }
+                onMissing?.invoke(currentUri)
+                break
+            }
+
+            var track = -1
+            var format: MediaFormat? = null
+            for (i in 0 until extractor.trackCount) {
+                val f = extractor.getTrackFormat(i)
+                val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) { track = i; format = f; break }
+            }
+            if (track < 0 || format == null) {
+                extractor.release()
+                throw IllegalStateException("no audio track")
+            }
+            extractor.selectTrack(track)
+
+            val mime = format.getString(MediaFormat.KEY_MIME)!!
+            val srcRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val srcCh = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            onInfo?.invoke("$mime  $srcRate Hz  ${srcCh}ch  ->  $outRate Hz")
+            Log.i("VCProbe", "track mime=$mime rate=$srcRate ch=$srcCh")
+
+            if (sink == null) {
+                sink = PcmSink(target, srcRate, outRate, srcCh, currentStart, onProgress,
+                    tap = { b, n ->
+                        analyzer.delayFrames = target.bufferedFrames()
+                        analyzer.offer(b, n, mixerVolume)
+                    },
+                    onBoundary = { idx -> if (running && session == myGen) onBoundary?.invoke(idx) })
+            }
+            if (currentStart > 0) {
+                extractor.seekTo(currentStart * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                Log.i("VCProbe", "seek to $currentStart ms (sampleTime=${extractor.sampleTime})")
+            }
+
+            val s = sink
+            if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) decodeRaw(extractor, s, format)
+            else decodeCodec(extractor, format, track, s)
+            extractor.release()
+
+            if (!running || session != myGen) break
+
+            // Natural end: continue seamlessly when the next track has the same
+            // native format. Anything else falls back to the normal end path.
+            val next = gaplessProvider?.invoke() ?: break
+            val (nextIndex, nextTrack) = next
+            if (srcRate != outRate || srcCh != s.channels()) break
+            val nextRate = probeRate(nextTrack.uri)
+            val nextCh = probeChannels(nextTrack.uri)
+            if (nextRate != outRate || nextCh != srcCh) {
+                Log.i("VCProbe", "gapless: format change $nextRate/${nextCh}ch -> normal switch")
+                break
+            }
+
+            s.commitBoundary(nextIndex)
+            Log.i("VCProbe", "gapless: continuing into ${nextTrack.title}")
+            currentUri = nextTrack.uri
+            currentStart = 0
         }
-        sink.flush()
+
+        sink?.flush()
         target.eos()
-        extractor.release()
         Log.i("VCProbe", "decode end")
     }
 
@@ -482,7 +532,8 @@ class UsbDirectPlayer(private val context: Context) {
         private val srcCh: Int,
         private val startMs: Long,
         private val progress: ((Long) -> Unit)?,
-        private val tap: ((FloatBuffer, Int) -> Unit)?
+        private val tap: ((FloatBuffer, Int) -> Unit)?,
+        private val onBoundary: ((Int) -> Unit)?
     ) {
         private companion object {
             const val BLOCK = 2048              // frames per resampler pass
@@ -506,6 +557,9 @@ class UsbDirectPlayer(private val context: Context) {
 
         private var lastReportMs = 0L
         private var framesOut = 0L
+        private var boundaryFrame = 0L
+        private var pendingBoundary = -1
+        private var trackStartFrames = 0L
 
         init {
             // linear interpolation is gone: equal rates pass through untouched
@@ -588,11 +642,28 @@ class UsbDirectPlayer(private val context: Context) {
             framesOut += frames
 
             val played = target.playedFrames()
-            val ms = startMs + played * 1000L / outRate
-            if (ms - lastReportMs >= 200) {
+            if (pendingBoundary >= 0 && played >= boundaryFrame) {
+                trackStartFrames = boundaryFrame
+                val idx = pendingBoundary
+                pendingBoundary = -1
+                onBoundary?.invoke(idx)     // metadata flips on the audible sample
+            }
+            val rel = played - trackStartFrames
+            val base = if (trackStartFrames > 0) 0L else startMs
+            val ms = base + rel * 1000L / outRate
+            if (ms - lastReportMs >= 200 || ms < lastReportMs) {
                 lastReportMs = ms
                 progress?.invoke(ms)
             }
+        }
+
+        fun channels(): Int = srcCh
+
+        /** Flush what is queued, then arm the audible switch at this frame. */
+        fun commitBoundary(index: Int) {
+            flushOut()
+            boundaryFrame = framesOut
+            pendingBoundary = index
         }
 
         fun flush() {

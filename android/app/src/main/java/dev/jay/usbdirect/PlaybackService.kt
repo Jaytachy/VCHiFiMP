@@ -126,6 +126,8 @@ class PlaybackService : Service() {
                     if (!suppressFinish && _state.value.playing) advanceOrStop()
                 }
             }
+            gaplessProvider = { peekNextForGapless() }
+            onBoundary = { idx -> main.post { commitBoundary(idx) } }
             onMissing = { uri ->
                 main.post { handleMissing(uri.toString()) }
             }
@@ -362,6 +364,35 @@ class PlaybackService : Service() {
 
     /** true = take the device over (bit-perfect). false = Android's mixer. */
     fun setExclusive(on: Boolean) { exclusive = on }
+
+    /** Next track in play order, without committing to it yet. */
+    private fun peekNextForGapless(): Pair<Int, Track>? {
+        if (queue.isEmpty() || index < 0) return null
+        val n = when (repeatMode) {
+            RepeatMode.ONE -> index
+            RepeatMode.ALL -> if (index + 1 < queue.size) index + 1 else 0
+            RepeatMode.OFF -> if (index + 1 < queue.size) index + 1 else -1
+        }
+        if (n < 0 || n >= queue.size) return null
+        return n to queue[n]
+    }
+
+    /** The seam is now audible: flip metadata without touching the stream. */
+    private fun commitBoundary(idx: Int) {
+        val t = queue.getOrNull(idx) ?: return
+        index = idx
+        pausedAtMs = 0
+        val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
+        _state.value = _state.value.copy(
+            index = idx, title = t.title, artist = t.artist, album = t.album,
+            codec = codec, positionMs = 0, durationMs = t.durationMs, missingUri = null
+        )
+        saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
+                                   t.durationMs, codec))
+        startForegroundInternal(t.title)
+        publish(PlaybackState.STATE_PLAYING)
+        Log.i("VCProbe", "gapless boundary -> ${t.title}")
+    }
 
     /** Drop a vanished file from the queue and keep playing around it. */
     private fun handleMissing(uriString: String) {

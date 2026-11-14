@@ -92,6 +92,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            if (intent?.getBooleanExtra("gapless", false) == true) {
+                val f = java.io.File(getExternalFilesDir(null), "test.wav")
+                if (f.exists()) {
+                    val uri = Uri.fromFile(f)
+                    val info = MediaProbe.of(this@MainActivity, uri)
+                    val dur = info?.durationMs ?: 0L
+                    val a = LibTrack(uri, "gapless A", "test", "test", 1, dur, info?.sampleRate ?: 96000)
+                    val b = LibTrack(uri, "gapless B", "test", "test", 2, dur, info?.sampleRate ?: 96000)
+                    Log.i("VCProbe", "gapless test: 2 tracks of $dur ms")
+                    playList(listOf(a, b), 0)
+                }
+            }
             if (intent?.getBooleanExtra("autoplayalbum", false) == true) {
               android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                 val debugList: List<LibTrack> =
