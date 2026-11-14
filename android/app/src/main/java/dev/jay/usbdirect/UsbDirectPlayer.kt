@@ -36,6 +36,7 @@ class UsbDirectPlayer(private val context: Context) {
     var onFinished: (() -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
     var onProgress: ((positionMs: Long) -> Unit)? = null
+    var onFormat: ((rate: Int, bits: Int) -> Unit)? = null
 
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
@@ -54,6 +55,7 @@ class UsbDirectPlayer(private val context: Context) {
         // resampled; otherwise fall back to the requested rate.
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
+        onFormat?.invoke(dev, bits)
         Log.i("VCProbe", "source=" + src + " Hz -> device=" + dev + " Hz" +
                 if (src == dev) " (bit-perfect path, no resample)" else " (resampled)")
         if (useMixer) {

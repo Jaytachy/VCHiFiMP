@@ -21,13 +21,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,15 +42,15 @@ class MainActivity : ComponentActivity() {
     private var albums by mutableStateOf<List<LibAlbum>>(emptyList())
     private var scanState by mutableStateOf("")
     private var scanning by mutableStateOf(false)
-    private var usbState by mutableStateOf("no DAC")
+    private var dacName by mutableStateOf("")
     private var volume by mutableStateOf(0.2f)
     private var exclusive by mutableStateOf(true)
+    private var tab by mutableStateOf(Tab.HOME)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
-    private var showAnalyzer by mutableStateOf(false)
+    private var folderLabel by mutableStateOf("")
+
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
-    private var pendingDebugTrack: Track? = null
-
     private val cancelScan = AtomicBoolean(false)
     private var scanGen = 0
 
@@ -63,6 +60,8 @@ class MainActivity : ComponentActivity() {
             service = svc
             svc.setVolume(volume)
             svc.setExclusive(exclusive)
+            lifecycleScope.launch { svc.state.collect { transport = it } }
+
             intent?.getStringExtra("debugfile")?.let { path ->
                 val f = java.io.File(path)
                 if (f.exists()) {
@@ -71,7 +70,6 @@ class MainActivity : ComponentActivity() {
                         MediaProbe.titleOf(Uri.fromFile(f)), info?.durationMs ?: 0L)
                 }
             }
-            lifecycleScope.launch { svc.state.collect { transport = it } }
             pendingDebug?.let { t ->
                 pendingDebug = null
                 val d = audioDevice()
@@ -80,15 +78,7 @@ class MainActivity : ComponentActivity() {
                         svc.setDevice(d, 24, volume)
                         svc.setQueue(listOf(t), 0)
                     } else {
-                        usbManager.requestPermission(
-                            d, PendingIntent.getBroadcast(
-                                this@MainActivity, 0,
-                                Intent(ACTION_USB_PERMISSION),
-                                PendingIntent.FLAG_IMMUTABLE
-                            )
-                        )
-                        pendingAlbum = null
-                        pendingDebugTrack = t
+                        requestUsb(d)
                     }
                 }
             }
@@ -99,14 +89,13 @@ class MainActivity : ComponentActivity() {
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (intent.action != ACTION_USB_PERMISSION) return
-            if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                val p = pendingAlbum
-                val d = audioDevice()
-                if (p != null && d != null) startAlbum(p.first, p.second, d)
-            } else {
-                usbState = "USB permission denied"
+            if (!intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                dacName = "USB permission denied"
+                return
             }
-            pendingAlbum = null
+            val d = audioDevice() ?: return
+            val p = pendingAlbum
+            if (p != null) { pendingAlbum = null; startAlbum(p.first, p.second, d) }
         }
     }
 
@@ -124,199 +113,157 @@ class MainActivity : ComponentActivity() {
 
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
         if (savedTree != null) {
+            folderLabel = Uri.decode(savedTree.substringAfterLast(':')).replace("/", " / ")
             val tree = Uri.parse(savedTree)
             val cached = LibraryStore.load(this, tree)
             if (cached != null) {
-                // launch is instant: show the cached library, rescan only on demand
                 tracks = cached
                 albums = LibraryScanner.albums(cached)
                 scanState = "${cached.size} tracks, ${albums.size} albums"
             } else {
                 scan(tree)
             }
+        } else {
+            scanState = "pick a folder to start"
+        }
+        dacName = audioDevice()?.productName ?: ""
+        when (intent?.getStringExtra("tab")) {
+            "music" -> tab = Tab.MUSIC
+            "output" -> tab = Tab.OUTPUT
+            "settings" -> tab = Tab.SETTINGS
         }
 
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    val album = openAlbum
-                    if (showAnalyzer) {
-                        BackHandler { showAnalyzer = false }
-                        AnalyzerScreen(service?.player?.analyzer) { showAnalyzer = false }
-                    } else if (album != null) {
-                        BackHandler { openAlbum = null }
-                        AlbumScreen(album) { openAlbum = null }
-                    } else {
-                        LibraryScreen()
-                    }
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun LibraryScreen() {
-        var showNowPlaying by remember { mutableStateOf(false) }
-
-        val picker = rememberLauncherForActivityResult(
-            ActivityResultContracts.OpenDocumentTree()
-        ) { uri ->
-            if (uri != null) {
-                contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                getPreferences(MODE_PRIVATE).edit().putString("tree", uri.toString()).apply()
-                scan(uri)
-            }
-        }
-
-        Scaffold(
-            topBar = {
-                Column(Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("VCHiFiMP", style = MaterialTheme.typography.headlineSmall,
-                             modifier = Modifier.weight(1f))
-                        TextButton(onClick = { showAnalyzer = true }) { Text("Spectrum") }
-                    }
-                    Text(
-                        if (transport.playing) "playing  ${transport.title}"
-                        else scanState.ifEmpty { usbState },
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
-                    )
-                }
-            },
-            bottomBar = {
-                if (transport.title.isNotEmpty()) {
-                    Surface(tonalElevation = 3.dp) {
-                        Column(
-                            Modifier.fillMaxWidth().navigationBarsPadding()
-                                .padding(horizontal = 12.dp, vertical = 4.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    transport.title, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Text(
-                                    fmt(transport.positionMs) + " / " + fmt(transport.durationMs),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-
-                            // timeline: drag to seek, commits only on release so a
-                            // seek does not reopen the DAC on every pixel
-                            var dragging by remember { mutableStateOf(false) }
-                            var dragPos by remember { mutableStateOf(0f) }
-                            val dur = transport.durationMs.coerceAtLeast(1L)
-                            Slider(
-                                value = (if (dragging) dragPos
-                                         else transport.positionMs.toFloat())
-                                    .coerceIn(0f, dur.toFloat()),
-                                valueRange = 0f..dur.toFloat(),
-                                onValueChange = { dragging = true; dragPos = it },
-                                onValueChangeFinished = {
-                                    dragging = false
-                                    service?.seekTo(dragPos.toLong())
-                                },
-                                modifier = Modifier.fillMaxWidth().height(28.dp)
+                    val picker = rememberLauncherForActivityResult(
+                        ActivityResultContracts.OpenDocumentTree()
+                    ) { uri ->
+                        if (uri != null) {
+                            contentResolver.takePersistableUriPermission(
+                                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
                             )
+                            getPreferences(MODE_PRIVATE).edit()
+                                .putString("tree", uri.toString()).apply()
+                            folderLabel = Uri.decode(uri.toString().substringAfterLast(':'))
+                                .replace("/", " / ")
+                            scan(uri)
+                        }
+                    }
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                TextButton(onClick = { service?.previous() }) { Text("|◀") }
-                                TextButton(onClick = {
-                                    if (transport.playing) service?.pause() else service?.resume()
-                                }) { Text(if (transport.playing) "Pause" else "Play") }
-                                TextButton(onClick = { service?.next() }) { Text("▶|") }
-                                Spacer(Modifier.width(8.dp))
-                                Text("vol", style = MaterialTheme.typography.bodySmall)
-                                Slider(
-                                    value = volume,
-                                    onValueChange = {
+                    val album = openAlbum
+                    if (album != null) BackHandler { openAlbum = null }
+
+                    Scaffold(
+                        bottomBar = {
+                            Column(Modifier.navigationBarsPadding()) {
+                                MiniPlayer(
+                                    transport = transport,
+                                    volume = volume,
+                                    onPlayPause = {
+                                        if (transport.playing) service?.pause()
+                                        else service?.resume()
+                                    },
+                                    onPrev = { service?.previous() },
+                                    onNext = { service?.next() },
+                                    onSeek = { service?.seekTo(it) },
+                                    onVolume = {
                                         volume = it
                                         service?.setVolume(it)
                                         getPreferences(MODE_PRIVATE).edit()
                                             .putFloat("volume", it).apply()
-                                    },
-                                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                                    }
                                 )
-                                Text("${(volume * 100).toInt()}%",
-                                     style = MaterialTheme.typography.bodySmall)
+                                BottomNav(tab, { tab = it })
+                            }
+                        }
+                    ) { pad ->
+                        Box(Modifier.padding(pad).fillMaxSize()) {
+                            if (album != null) {
+                                AlbumScreen(album) { openAlbum = null }
+                            } else when (tab) {
+                                Tab.HOME -> HomeScreen(
+                                    transport = transport,
+                                    trackCount = tracks.size,
+                                    albumCount = albums.size,
+                                    dacName = dacName,
+                                    onShuffleAll = { shuffleAll() },
+                                    onPlayPause = {
+                                        if (transport.playing) service?.pause()
+                                        else service?.resume()
+                                    },
+                                    onResumeLast = { service?.resume() }
+                                )
+                                Tab.MUSIC -> MusicScreen(
+                                    albums = albums,
+                                    scanning = scanning,
+                                    scanState = scanState,
+                                    onOpenAlbum = { openAlbum = it },
+                                    onChooseFolder = { picker.launch(null) },
+                                    onRescan = {
+                                        getPreferences(MODE_PRIVATE).getString("tree", null)
+                                            ?.let { scan(Uri.parse(it)) }
+                                    }
+                                )
+                                Tab.OUTPUT -> OutputScreen(
+                                    analyzer = service?.player?.analyzer,
+                                    transport = transport,
+                                    dacName = dacName,
+                                    exclusive = exclusive,
+                                    onExclusive = {
+                                        exclusive = it
+                                        service?.setExclusive(it)
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("exclusive", it).apply()
+                                    },
+                                    volume = volume,
+                                    onVolume = {
+                                        volume = it
+                                        service?.setVolume(it)
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putFloat("volume", it).apply()
+                                    }
+                                )
+                                Tab.SETTINGS -> SettingsScreen(
+                                    folderLabel = folderLabel.ifEmpty { "not set" },
+                                    trackCount = tracks.size,
+                                    onChooseFolder = { picker.launch(null) },
+                                    onRescan = {
+                                        getPreferences(MODE_PRIVATE).getString("tree", null)
+                                            ?.let { scan(Uri.parse(it)) }
+                                    },
+                                    onClearCache = {
+                                        LibraryStore.clear(this@MainActivity)
+                                        tracks = emptyList()
+                                        albums = emptyList()
+                                        scanState = "cache cleared — rescan"
+                                    }
+                                )
                             }
                         }
                     }
-                }
-            }
-        ) { pad ->
-            LazyColumn(
-                Modifier.fillMaxSize().padding(pad).padding(horizontal = 12.dp),
-                state = rememberLazyListState()
-            ) {
-                item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { picker.launch(null) }) { Text("Choose folder") }
-                        OutlinedButton(
-                            enabled = !scanning,
-                            onClick = { getPreferences(MODE_PRIVATE)
-                                .getString("tree", null)?.let { scan(Uri.parse(it)) } }
-                        ) { Text("Rescan") }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Exclusive DAC", style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                if (exclusive) "bit-perfect, this app owns the device"
-                                else "Android mixer, other apps can play",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        Switch(
-                            checked = exclusive,
-                            onCheckedChange = {
-                                exclusive = it
-                                service?.setExclusive(it)
-                                getPreferences(MODE_PRIVATE).edit()
-                                    .putBoolean("exclusive", it).apply()
-                            }
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-                if (albums.isEmpty() && !scanning) {
-                    item {
-                        Text(
-                            "Pick the folder that holds your music. " +
-                            "It is scanned once; every play goes straight to the DAC.",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-                items(albums, key = { it.name + it.artist }) { a ->
-                    ListItem(
-                        headlineContent = { Text(a.name) },
-                        supportingContent = { Text("${a.artist}  ·  ${a.tracks.size} tracks") },
-                        modifier = Modifier.clickable { openAlbum = a }
-                    )
                 }
             }
         }
     }
 
+    /* ------------------------------------------------------------- albums */
+
     @Composable
     private fun AlbumScreen(album: LibAlbum, onBack: () -> Unit) {
-        Scaffold(
-            topBar = {
-                Column(Modifier.padding(16.dp)) {
-                    TextButton(onClick = onBack) { Text("< Library") }
-                    Text(album.name, style = MaterialTheme.typography.titleLarge)
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack) { Text("‹ Library") }
+                Column(Modifier.weight(1f)) {
+                    Text(album.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                         style = MaterialTheme.typography.titleMedium)
                     Text(album.artist, style = MaterialTheme.typography.bodySmall)
                 }
             }
-        ) { pad ->
-            LazyColumn(Modifier.fillMaxSize().padding(pad)) {
+            LazyColumn {
                 items(album.tracks, key = { it.uri.toString() }) { t ->
                     ListItem(
                         headlineContent = {
@@ -338,18 +285,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /* ---------------------------------------------------------- playback */
+
     private fun playAlbum(a: LibAlbum, index: Int) {
         val d = audioDevice()
-        if (d == null) { usbState = "no USB DAC plugged in"; return }
+        if (d == null) { dacName = "no USB DAC plugged in"; return }
         if (usbManager.hasPermission(d)) startAlbum(a, index, d)
-        else {
-            pendingAlbum = a to index
-            usbManager.requestPermission(
-                d, PendingIntent.getBroadcast(
-                    this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
-                )
-            )
-        }
+        else { pendingAlbum = a to index; requestUsb(d) }
     }
 
     private fun startAlbum(a: LibAlbum, index: Int, d: UsbDevice) {
@@ -358,10 +300,22 @@ class MainActivity : ComponentActivity() {
         svc.setQueue(a.tracks.map { it.toQueueTrack() }, index)
     }
 
-    private fun fmt(ms: Long): String {
-        if (ms <= 0) return "-:--"
-        val t = ms / 1000
-        return "%d:%02d".format(t / 60, t % 60)
+    private fun shuffleAll() {
+        val d = audioDevice()
+        if (d == null) { dacName = "no USB DAC plugged in"; return }
+        if (tracks.isEmpty()) return
+        val shuffled = tracks.shuffled().map { it.toQueueTrack() }
+        if (!usbManager.hasPermission(d)) { requestUsb(d); return }
+        service?.setDevice(d, 24, volume)
+        service?.setQueue(shuffled, 0)
+    }
+
+    private fun requestUsb(d: UsbDevice) {
+        usbManager.requestPermission(
+            d, PendingIntent.getBroadcast(
+                this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
+            )
+        )
     }
 
     private fun audioDevice(): UsbDevice? =
@@ -371,9 +325,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    /* ------------------------------------------------------------- scan */
+
     private fun scan(tree: Uri) {
-        // Only one scan at a time: a second one would race the first and both
-        // would publish partial libraries.
         cancelScan.set(true)
         val gen = ++scanGen
         cancelScan.set(false)
@@ -382,9 +336,7 @@ class MainActivity : ComponentActivity() {
         Thread {
             val found = LibraryScanner.scan(
                 this, tree,
-                onProgress = { n, name ->
-                    scanState = "scanning  $n  $name"
-                },
+                onProgress = { n, name -> scanState = "scanning  $n  $name" },
                 cancel = cancelScan
             )
             LibraryStore.save(this, tree, found)
@@ -394,11 +346,12 @@ class MainActivity : ComponentActivity() {
                 albums = LibraryScanner.albums(found)
                 scanning = false
                 scanState = "${found.size} tracks, ${albums.size} albums"
-                usbState = audioDevice()?.productName?.let { "DAC: $it" } ?: "no DAC"
-            }
-            val d = audioDevice()
-            if (d != null) {
-                runOnUiThread { usbState = "DAC: ${d.productName}" }
+                dacName = audioDevice()?.productName ?: ""
+        when (intent?.getStringExtra("tab")) {
+            "music" -> tab = Tab.MUSIC
+            "output" -> tab = Tab.OUTPUT
+            "settings" -> tab = Tab.SETTINGS
+        }
             }
         }.start()
     }

@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,7 +28,7 @@ private val EMPTY_FRAME = AudioAnalyzer.Frame(
 private val DB_FLOOR = -90f
 
 @Composable
-fun AnalyzerScreen(analyzer: AudioAnalyzer?, onClose: () -> Unit) {
+fun SpectrumPanel(analyzer: AudioAnalyzer?, modifier: Modifier = Modifier) {
     val n = AudioAnalyzer.BANDS
     val target = remember { FloatArray(n) { DB_FLOOR } }
     val display = remember { FloatArray(n) { DB_FLOOR } }
@@ -54,15 +53,7 @@ fun AnalyzerScreen(analyzer: AudioAnalyzer?, onClose: () -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onClose) { Text("‹ Back") }
-            Spacer(Modifier.width(4.dp))
-            Text("Spectrum", style = MaterialTheme.typography.titleLarge)
-        }
-
-        Spacer(Modifier.height(8.dp))
-
+    Column(modifier.fillMaxWidth()) {
         Canvas(
             Modifier
                 .fillMaxWidth()
@@ -156,7 +147,7 @@ private fun dbText(db: Float): String =
     if (db <= -99.9f) "-inf dB" else "%.1f dB".format(db)
 
 @Composable
-private fun LevelMeter(peakDb: Float, rmsDb: Float, holdDb: Float, clipping: Boolean) {
+fun LevelMeter(peakDb: Float, rmsDb: Float, holdDb: Float, clipping: Boolean) {
     val lo = -100f
     val hi = 6f
     fun frac(db: Float) = ((db - lo) / (hi - lo)).coerceIn(0f, 1f)

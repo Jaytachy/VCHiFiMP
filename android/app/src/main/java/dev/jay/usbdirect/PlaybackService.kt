@@ -27,6 +27,7 @@ data class TransportState(
     val title: String = "",
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
+    val format: String = "",
     val queueSize: Int = 0,
     val error: String? = null
 )
@@ -67,6 +68,9 @@ class PlaybackService : Service() {
         player = UsbDirectPlayer(this).apply {
             onInfo = { Log.i("VCProbe", "player: $it") }
             onProgress = { ms -> _state.value = _state.value.copy(positionMs = ms) }
+            onFormat = { rate, bits ->
+                _state.value = _state.value.copy(format = "$bits-bit · ${rate / 1000} kHz")
+            }
             onFinished = {
                 // A deliberate pause/stop also ends the decode loop. Without this
                 // guard the service read that as end-of-track and skipped ahead.
