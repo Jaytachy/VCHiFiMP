@@ -48,6 +48,10 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile private var session = 0
     /** Last position reported from reaped URBs; used to snapshot on DAC detach. */
     @Volatile private var lastReportedPosition = 0L
+    /** libsamplerate converter quality for resampled rates. */
+    @Volatile var resamplerQuality: Int = NativeResampler.QUALITY_MEDIUM
+    /** TPDF dither in the native packer. */
+    @Volatile private var dither = true
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -210,6 +214,7 @@ class UsbDirectPlayer(private val context: Context) {
                     try {
                         analyzer.start()
                         live.setVolume(volume)
+                        live.setDither(dither)
                         body(live)
                         completed = true
                     } catch (t: Throwable) {
@@ -248,6 +253,7 @@ class UsbDirectPlayer(private val context: Context) {
                 }
                 engine = eng
                 eng.setVolume(volume)
+                eng.setDither(dither)
 
                 analyzer.start()
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
@@ -295,6 +301,11 @@ class UsbDirectPlayer(private val context: Context) {
 
     /** Audible position of the current track, from reaped URBs. */
     fun positionMs(): Long = lastReportedPosition
+
+    fun setDither(on: Boolean) {
+        dither = on
+        engine?.setDither(on)
+    }
 
     fun setVolume(v: Float) {
         mixerVolume = v
@@ -380,7 +391,8 @@ class UsbDirectPlayer(private val context: Context) {
                         analyzer.delayFrames = target.bufferedFrames()
                         analyzer.offer(b, n, mixerVolume)
                     },
-                    onBoundary = { idx -> if (running && session == myGen) onBoundary?.invoke(idx) })
+                    onBoundary = { idx -> if (running && session == myGen) onBoundary?.invoke(idx) },
+                    quality = resamplerQuality)
             }
             if (currentStart > 0) {
                 extractor.seekTo(currentStart * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
@@ -545,7 +557,8 @@ class UsbDirectPlayer(private val context: Context) {
         private val startMs: Long,
         private val progress: ((Long) -> Unit)?,
         private val tap: ((FloatBuffer, Int) -> Unit)?,
-        private val onBoundary: ((Int) -> Unit)?
+        private val onBoundary: ((Int) -> Unit)?,
+        quality: Int = NativeResampler.QUALITY_MEDIUM
     ) {
         private companion object {
             const val BLOCK = 2048              // frames per resampler pass
@@ -554,7 +567,8 @@ class UsbDirectPlayer(private val context: Context) {
 
         private val passthrough = srcRate == outRate
         private val resampler =
-            if (passthrough) null else NativeResampler(2, outRate.toDouble() / srcRate)
+            if (passthrough) null
+            else NativeResampler(2, outRate.toDouble() / srcRate, quality)
 
         private val outBytes: ByteBuffer =
             ByteBuffer.allocateDirect(OUT_MAX * 2 * 4).order(ByteOrder.nativeOrder())

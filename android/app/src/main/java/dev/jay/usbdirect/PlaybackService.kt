@@ -105,6 +105,13 @@ class PlaybackService : Service() {
     @Volatile private var deviceLost = false
     /** True when the user deliberately picked mixer mode; never auto-claim then. */
     @Volatile private var mixerByUser = false
+    @Volatile private var gaplessEnabled = true
+    @Volatile private var autoReclaim = true
+
+    private val _sleepRemaining = MutableStateFlow<Long?>(null)
+    val sleepRemaining: StateFlow<Long?> = _sleepRemaining.asStateFlow()
+    private var sleepEndsAt = 0L
+    private val sleepHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     inner class LocalBinder : Binder() {
         fun service(): PlaybackService = this@PlaybackService
@@ -137,7 +144,14 @@ class PlaybackService : Service() {
                     if (!suppressFinish && _state.value.playing) advanceOrStop()
                 }
             }
-            gaplessProvider = { peekNextForGapless() }
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            bits = prefs.getInt("outBits", 24)
+            gaplessEnabled = prefs.getBoolean("gapless", true)
+            autoReclaim = prefs.getBoolean("autoReclaim", true)
+            // inside apply{} the receiver is the player we are constructing
+            resamplerQuality = prefs.getInt("srcQuality", NativeResampler.QUALITY_MEDIUM)
+            setDither(prefs.getBoolean("dither", true))
+            gaplessProvider = { if (gaplessEnabled) peekNextForGapless() else null }
             onBoundary = { idx -> main.post { commitBoundary(idx) } }
             onMissing = { uri ->
                 main.post { handleMissing(uri.toString()) }
@@ -320,7 +334,7 @@ class PlaybackService : Service() {
         // If the DAC was unplugged earlier and has come back (same queue, queue
         // advance, resume), take it again. Without this the whole queue stayed
         // on the mixer until a fresh album rebuilt the device.
-        if (device == null && deviceLost && !mixerByUser) {
+        if (device == null && deviceLost && autoReclaim && !mixerByUser) {
             findAttachedDac()?.let {
                 Log.i("VCProbe", "re-acquired DAC: ${it.productName}")
                 device = it
@@ -412,6 +426,71 @@ class PlaybackService : Service() {
         publish(PlaybackState.STATE_STOPPED)
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
+
+    fun setOutputBits(b: Int) {
+        bits = if (b == 16) 16 else 24
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("outBits", bits).apply()
+    }
+
+    fun outputBits(): Int = bits
+
+    fun setResamplerQuality(q: Int) {
+        player.resamplerQuality = q.coerceIn(0, 2)
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("srcQuality", q).apply()
+    }
+
+    fun resamplerQuality(): Int = player.resamplerQuality
+
+    fun setDither(on: Boolean) {
+        player.setDither(on)
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("dither", on).apply()
+    }
+
+    fun setGapless(on: Boolean) {
+        gaplessEnabled = on
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("gapless", on).apply()
+    }
+
+    fun gaplessOn(): Boolean = gaplessEnabled
+
+    fun setAutoReclaim(on: Boolean) {
+        autoReclaim = on
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("autoReclaim", on).apply()
+    }
+
+    fun autoReclaimOn(): Boolean = autoReclaim
+
+    /**
+     * Sleep timer. [minutes] = 0 cancels. Playback pauses cleanly when the
+     * countdown reaches zero; the remaining time is exposed for the UI.
+     */
+    fun setSleepTimer(minutes: Int) {
+        sleepHandler.removeCallbacksAndMessages(null)
+        if (minutes <= 0) {
+            sleepEndsAt = 0
+            _sleepRemaining.value = null
+            return
+        }
+        sleepEndsAt = System.currentTimeMillis() + minutes * 60_000L
+        _sleepRemaining.value = minutes * 60_000L
+        val tick = object : Runnable {
+            override fun run() {
+                val left = sleepEndsAt - System.currentTimeMillis()
+                if (left <= 0) {
+                    _sleepRemaining.value = null
+                    sleepEndsAt = 0
+                    Log.i("VCProbe", "sleep timer -> pause")
+                    pause()
+                } else {
+                    _sleepRemaining.value = left
+                    sleepHandler.postDelayed(this, 1000)
+                }
+            }
+        }
+        sleepHandler.postDelayed(tick, 1000)
+    }
+
+    fun sleepMinutesLeft(): Long? = _sleepRemaining.value?.let { (it + 59_999) / 60_000 }
 
     /** true = take the device over (bit-perfect). false = Android's mixer. */
     fun setExclusive(on: Boolean) {

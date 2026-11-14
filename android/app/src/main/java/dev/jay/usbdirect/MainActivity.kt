@@ -59,7 +59,16 @@ class MainActivity : ComponentActivity() {
     private var artVersion by mutableStateOf(0)
     private var showNowPlaying by mutableStateOf(false)
     private var showQueue by mutableStateOf(false)
-    private var darkTheme by mutableStateOf(true)
+    private var themeMode by mutableStateOf(ThemeMode.DARK)
+    private var dynamicColors by mutableStateOf(true)
+    private var outputBits by mutableStateOf(24)
+    private var srcQuality by mutableStateOf(NativeResampler.QUALITY_MEDIUM)
+    private var dither by mutableStateOf(true)
+    private var gaplessOn by mutableStateOf(true)
+    private var autoReclaim by mutableStateOf(true)
+    private var skipShort by mutableStateOf(false)
+    private var sleepMinutes by mutableStateOf(0)
+    private var sleepRemaining by mutableStateOf<Long?>(null)
     private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
     private var pendingPlay: Pair<List<Track>, Int>? = null
@@ -75,6 +84,11 @@ class MainActivity : ComponentActivity() {
             svc.setVolume(volume)
             svc.setExclusive(exclusive)
             svc.setHardwareVolume(hardwareVolume)
+            svc.setOutputBits(outputBits)
+            svc.setResamplerQuality(srcQuality)
+            svc.setDither(dither)
+            svc.setGapless(gaplessOn)
+            svc.setAutoReclaim(autoReclaim)
             // needed so Home's "continue listening" can start on a cold launch
             val dac = audioDevice()
             if (dac != null && usbManager.hasPermission(dac)) {
@@ -92,6 +106,7 @@ class MainActivity : ComponentActivity() {
             }
             lifecycleScope.launch { svc.deviceName.collect { dacName = it ?: "" } }
             lifecycleScope.launch { svc.exclusiveState.collect { exclusive = it } }
+            lifecycleScope.launch { svc.sleepRemaining.collect { sleepRemaining = it } }
             lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
             lifecycleScope.launch {
                 var lastMissing: String? = null
@@ -265,14 +280,25 @@ class MainActivity : ComponentActivity() {
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
 
         volume = getPreferences(MODE_PRIVATE).getFloat("volume", 0.2f)
-        darkTheme = getPreferences(MODE_PRIVATE).getBoolean("dark", true)
+        themeMode = runCatching {
+            ThemeMode.valueOf(getPreferences(MODE_PRIVATE).getString("theme", "DARK")!!)
+        }.getOrDefault(ThemeMode.DARK)
+        dynamicColors = getPreferences(MODE_PRIVATE).getBoolean("dynColors", true)
+        outputBits = getPreferences(MODE_PRIVATE).getInt("outBits", 24)
+        srcQuality = getPreferences(MODE_PRIVATE).getInt(
+            "srcQuality", NativeResampler.QUALITY_MEDIUM
+        )
+        dither = getPreferences(MODE_PRIVATE).getBoolean("dither", true)
+        gaplessOn = getPreferences(MODE_PRIVATE).getBoolean("gapless", true)
+        autoReclaim = getPreferences(MODE_PRIVATE).getBoolean("autoReclaim", true)
+        skipShort = getPreferences(MODE_PRIVATE).getBoolean("skipShort", false)
         exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
         hardwareVolume = getPreferences(MODE_PRIVATE).getBoolean("hwvol", false)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
         if (savedTree != null) {
-            folderLabel = Uri.decode(savedTree.substringAfterLast(':')).replace("/", " / ")
+            folderLabel = folderLabelOf(savedTree)
             val tree = Uri.parse(savedTree)
             val cached = LibraryStore.load(this, tree)
             if (cached != null) {
@@ -297,6 +323,15 @@ class MainActivity : ComponentActivity() {
 
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
+            val sleepMin = intent?.getIntExtra("sleepmin", -1) ?: -1
+            if (sleepMin >= 0) {
+                sleepMinutes = sleepMin
+                service?.setSleepTimer(sleepMin)
+            }
+            if (intent?.getIntExtra("outbits", -1) == 24 || intent?.getIntExtra("outbits", -1) == 16) {
+                outputBits = intent!!.getIntExtra("outbits", 24)
+                service?.setOutputBits(outputBits)
+            }
             if (intent?.getBooleanExtra("playall", false) == true) {
                 playList(tracks, intent?.getIntExtra("trackIndex", 0) ?: 0)
             }
@@ -308,7 +343,6 @@ class MainActivity : ComponentActivity() {
                 dacName = ""
                 exclusive = false
             }
-            if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
             if (intent?.getBooleanExtra("playall", false) == true) {
                 playList(tracks, intent?.getIntExtra("trackIndex", 0) ?: 0)
             }
@@ -325,7 +359,13 @@ class MainActivity : ComponentActivity() {
         }, 1200)
 
         setContent {
-            VcTheme(darkTheme) {
+            VcTheme(
+                dark = when (themeMode) {
+                    ThemeMode.SYSTEM -> systemIsDark()
+                    ThemeMode.DARK -> true
+                    ThemeMode.LIGHT -> false
+                }
+            ) {
                 Surface(Modifier.fillMaxSize()) {
                     val picker = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocumentTree()
@@ -336,8 +376,7 @@ class MainActivity : ComponentActivity() {
                             )
                             getPreferences(MODE_PRIVATE).edit()
                                 .putString("tree", uri.toString()).apply()
-                            folderLabel = Uri.decode(uri.toString().substringAfterLast(':'))
-                                .replace("/", " / ")
+                            folderLabel = folderLabelOf(uri.toString())
                             scan(uri)
                         }
                     }
@@ -374,6 +413,7 @@ class MainActivity : ComponentActivity() {
                                 service?.setShuffle(service?.state?.value?.shuffle != true)
                             },
                             onCycleRepeat = { service?.cycleRepeat() },
+                            dynamicColors = dynamicColors,
                             isFavorite = lastPlayed?.uri?.let { favorites.contains(it) } == true,
                             onToggleFavorite = {
                                 lastPlayed?.uri?.let { toggleFavorite(it) }
@@ -534,6 +574,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     player = service?.player,
                                     hardwareVolume = hardwareVolume,
+                                    dynamicColors = dynamicColors,
                                     onHardwareVolume = {
                                         hardwareVolume = it
                                         service?.setHardwareVolume(it)
@@ -555,11 +596,56 @@ class MainActivity : ComponentActivity() {
                                         albums = emptyList()
                                         scanState = "cache cleared — rescan"
                                     },
-                                    darkTheme = darkTheme,
-                                    onDarkTheme = {
-                                        darkTheme = it
+                                    themeMode = themeMode,
+                                    onThemeMode = {
+                                        themeMode = it
                                         getPreferences(MODE_PRIVATE).edit()
-                                            .putBoolean("dark", it).apply()
+                                            .putString("theme", it.name).apply()
+                                    },
+                                    dynamicColors = dynamicColors,
+                                    onDynamicColors = {
+                                        dynamicColors = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("dynColors", it).apply()
+                                    },
+                                    outputBits = outputBits,
+                                    onOutputBits = {
+                                        outputBits = it
+                                        service?.setOutputBits(it)
+                                    },
+                                    srcQuality = srcQuality,
+                                    onSrcQuality = {
+                                        srcQuality = it
+                                        service?.setResamplerQuality(it)
+                                    },
+                                    dither = dither,
+                                    onDither = {
+                                        dither = it
+                                        service?.setDither(it)
+                                    },
+                                    gapless = gaplessOn,
+                                    onGapless = {
+                                        gaplessOn = it
+                                        service?.setGapless(it)
+                                    },
+                                    autoReclaim = autoReclaim,
+                                    onAutoReclaim = {
+                                        autoReclaim = it
+                                        service?.setAutoReclaim(it)
+                                    },
+                                    sleepRemainingMs = sleepRemaining,
+                                    sleepMinutes = sleepMinutes,
+                                    onSleepMinutes = {
+                                        sleepMinutes = it
+                                        service?.setSleepTimer(it)
+                                    },
+                                    skipShort = skipShort,
+                                    onSkipShort = {
+                                        skipShort = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("skipShort", it).apply()
+                                        getPreferences(MODE_PRIVATE).getString("tree", null)
+                                            ?.let { t -> scan(Uri.parse(t)) }
                                     }
                                 )
                             }
@@ -673,6 +759,13 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** "primary:Music/Albums" -> "Albums"; keeps the settings row readable. */
+    private fun folderLabelOf(tree: String): String {
+        val tail = Uri.decode(tree.substringAfterLast(':')).trimEnd('/')
+        val name = tail.substringAfterLast('/')
+        return name.ifEmpty { tail.ifEmpty { "Music" } }
+    }
+
     private fun audioDevice(): UsbDevice? =
         usbManager.deviceList.values.firstOrNull { d ->
             (0 until d.interfaceCount).any {
@@ -702,11 +795,12 @@ class MainActivity : ComponentActivity() {
         scanning = true
         scanState = "scanning…"
         Thread {
-            val found = LibraryScanner.scan(
+            val raw = LibraryScanner.scan(
                 this, tree,
                 onProgress = { n, name -> scanState = "scanning  $n  $name" },
                 cancel = cancelScan
             )
+            val found = if (skipShort) raw.filter { it.durationMs >= 30_000 } else raw
             LibraryStore.save(this, tree, found)
             val grouped = LibraryScanner.albums(found)
 

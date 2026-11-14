@@ -12,10 +12,12 @@ typedef struct {
     double ratio;
 } rs_t;
 
-rs_t *rs_new(int channels, double ratio)
+rs_t *rs_new(int channels, double ratio, int quality)
 {
     int err = 0;
-    SRC_STATE *st = src_new(SRC_SINC_MEDIUM_QUALITY, channels, &err);
+    /* libsamplerate orders these best -> fastest: 0, 1, 2 */
+    int q = (quality < 0) ? 0 : (quality > 2) ? 2 : quality;
+    SRC_STATE *st = src_new(q, channels, &err);
     if (!st) return NULL;
     rs_t *r = calloc(1, sizeof(*r));
     if (!r) { src_delete(st); return NULL; }

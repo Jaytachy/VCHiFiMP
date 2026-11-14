@@ -1,9 +1,12 @@
 package dev.jay.usbdirect
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +32,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -57,7 +63,8 @@ fun NowPlayingScreen(
     onToggleShuffle: () -> Unit = {},
     onCycleRepeat: () -> Unit = {},
     isFavorite: Boolean = false,
-    onToggleFavorite: () -> Unit = {}
+    onToggleFavorite: () -> Unit = {},
+    dynamicColors: Boolean = true
 ) {
     val transport = rememberTransport(transportFlow)
 
@@ -78,9 +85,46 @@ fun NowPlayingScreen(
     var dragPos by remember { mutableStateOf(0f) }
     val dur = transport.durationMs.coerceAtLeast(1L)
 
+    // Swipe-down to dismiss: the whole player follows the finger and springs back
+    // unless it was pulled far enough.
+    var pull by remember { mutableStateOf(0f) }
+
+    val artAccent = rememberArtAccent(transport.album, transport.artist, dynamicColors)
+    val accentColor by animateColorAsState(
+        targetValue = artAccent?.primary ?: MaterialTheme.colorScheme.primary,
+        animationSpec = androidx.compose.animation.core.tween(600),
+        label = "accent"
+    )
+    val coverScale by animateFloatAsState(
+        targetValue = if (transport.playing) 1f else 0.94f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 380f),
+        label = "coverScale"
+    )
+
     val artFraction by animateFloatAsState(if (showQueue) 0.40f else 0.86f, label = "art")
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .offset { IntOffset(0, pull.toInt()) }
+            .then(
+                if (showQueue) Modifier else Modifier.pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onVerticalDrag = { change, drag ->
+                            if (drag > 0f || pull > 0f) {
+                                pull = (pull + drag).coerceAtLeast(0f)
+                                change.consume()
+                            }
+                        },
+                        onDragEnd = {
+                            if (pull > 180f) onClose() else pull = 0f
+                        },
+                        onDragCancel = { pull = 0f }
+                    )
+                }
+            )
+            .background(MaterialTheme.colorScheme.background)
+    ) {
 
         val bg = bitmap
         if (bg != null) {
@@ -93,8 +137,9 @@ fun NowPlayingScreen(
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0f to MaterialTheme.colorScheme.background.copy(alpha = 0.86f),
-                    0.5f to MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
+                    0f to accentColor.copy(alpha = 0.42f),
+                    0.35f to accentColor.copy(alpha = 0.16f),
+                    0.60f to MaterialTheme.colorScheme.background.copy(alpha = 0.92f),
                     1f to MaterialTheme.colorScheme.background
                 )
             )
@@ -145,6 +190,10 @@ fun NowPlayingScreen(
                     Modifier
                         .fillMaxWidth(artFraction)
                         .aspectRatio(1f)
+                        .graphicsLayer {
+                            scaleX = coverScale
+                            scaleY = coverScale
+                        }
                         .shadow(26.dp, RoundedCornerShape(22.dp))
                         .clip(RoundedCornerShape(22.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -190,7 +239,7 @@ fun NowPlayingScreen(
                         Box(
                             Modifier.size(12.dp)
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
+                                .background(accentColor)
                         )
                     },
                     track = { state ->
@@ -204,7 +253,7 @@ fun NowPlayingScreen(
                         ) {
                             Box(
                                 Modifier.fillMaxWidth(frac).fillMaxHeight()
-                                    .background(MaterialTheme.colorScheme.primary)
+                                    .background(accentColor)
                             )
                         }
                     }

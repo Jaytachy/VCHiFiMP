@@ -28,7 +28,11 @@ private val EMPTY_FRAME = AudioAnalyzer.Frame(
 private val DB_FLOOR = -90f
 
 @Composable
-fun SpectrumPanel(analyzer: AudioAnalyzer?, modifier: Modifier = Modifier) {
+fun SpectrumPanel(
+    analyzer: AudioAnalyzer?,
+    modifier: Modifier = Modifier,
+    accent: Color? = null
+) {
     val n = AudioAnalyzer.BANDS
     val target = remember { FloatArray(n) { DB_FLOOR } }
     val display = remember { FloatArray(n) { DB_FLOOR } }
@@ -98,17 +102,20 @@ fun SpectrumPanel(analyzer: AudioAnalyzer?, modifier: Modifier = Modifier) {
                 lineTo(0f, floorY)
                 close()
             }
+            val a = accent ?: Color(0xFF7CE7C3)
+            val a2 = accent?.copy(alpha = 1f) ?: Color(0xFF6E8BFF)
             drawPath(
                 area,
                 Brush.verticalGradient(
-                    0f to Color(0x997CE7C3),
-                    0.45f to Color(0x666E8BFF),
-                    1f to Color(0x0DB06BFF)
+                    0f to a.copy(alpha = 0.60f),
+                    0.45f to a2.copy(alpha = 0.38f),
+                    1f to a2.copy(alpha = 0.05f)
                 )
             )
             // soft outer glow then the crisp line
-            drawPath(line, Color(0x407CE7C3), style = Stroke(width = 8f))
-            drawPath(line, Color(0xFF9FF3D6), style = Stroke(width = 2.5f))
+            drawPath(line, a.copy(alpha = 0.25f), style = Stroke(width = 8f))
+            drawPath(line, accent?.copy(alpha = 0.95f) ?: Color(0xFF9FF3D6),
+                     style = Stroke(width = 2.5f))
         }
 
         Spacer(Modifier.height(6.dp))

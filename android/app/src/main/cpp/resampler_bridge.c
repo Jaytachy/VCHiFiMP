@@ -2,16 +2,17 @@
 #include <stdint.h>
 
 typedef struct rs_t rs_t;
-rs_t *rs_new(int channels, double ratio);
+rs_t *rs_new(int channels, double ratio, int quality);
 void rs_delete(rs_t *r);
 int  rs_process(rs_t *r, const float *in, int inFrames, float *out, int outMax);
 int  rs_flush(rs_t *r, float *out, int outMax);
 
 JNIEXPORT jlong JNICALL
 Java_dev_jay_usbdirect_NativeResampler_nativeNew(JNIEnv *env, jobject thiz,
-                                                 jint channels, jdouble ratio)
+                                                 jint channels, jdouble ratio,
+                                                 jint quality)
 {
-    return (jlong)(intptr_t)rs_new((int)channels, (double)ratio);
+    return (jlong)(intptr_t)rs_new((int)channels, (double)ratio, (int)quality);
 }
 
 JNIEXPORT jint JNICALL

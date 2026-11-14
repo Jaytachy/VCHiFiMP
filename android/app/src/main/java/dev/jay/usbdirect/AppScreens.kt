@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -933,7 +935,8 @@ fun OutputScreen(
     onVolume: (Float) -> Unit,
     player: UsbDirectPlayer?,
     hardwareVolume: Boolean,
-    onHardwareVolume: (Boolean) -> Unit
+    onHardwareVolume: (Boolean) -> Unit,
+    dynamicColors: Boolean = true
 ) {
     val transport = rememberTransport(transportFlow)
 
@@ -1082,7 +1085,12 @@ fun OutputScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        item { SpectrumPanel(analyzer) }
+        item {
+            val accent = rememberArtAccent(
+                transport.album, transport.artist, dynamicColors
+            )?.primary
+            SpectrumPanel(analyzer, accent = accent)
+        }
     }
 }
 
@@ -1105,45 +1113,265 @@ fun SettingsScreen(
     onChooseFolder: () -> Unit,
     onRescan: () -> Unit,
     onClearCache: () -> Unit,
-    darkTheme: Boolean,
-    onDarkTheme: (Boolean) -> Unit
+    themeMode: ThemeMode,
+    onThemeMode: (ThemeMode) -> Unit,
+    dynamicColors: Boolean,
+    onDynamicColors: (Boolean) -> Unit,
+    outputBits: Int,
+    onOutputBits: (Int) -> Unit,
+    srcQuality: Int,
+    onSrcQuality: (Int) -> Unit,
+    dither: Boolean,
+    onDither: (Boolean) -> Unit,
+    gapless: Boolean,
+    onGapless: (Boolean) -> Unit,
+    autoReclaim: Boolean,
+    onAutoReclaim: (Boolean) -> Unit,
+    sleepRemainingMs: Long?,
+    sleepMinutes: Int,
+    onSleepMinutes: (Int) -> Unit,
+    skipShort: Boolean,
+    onSkipShort: (Boolean) -> Unit,
+    version: String = "1.0.0"
 ) {
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
         item {
             Spacer(Modifier.height(24.dp))
             Text("Settings", style = MaterialTheme.typography.headlineMedium)
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(18.dp))
 
-            Text("Music folder", style = MaterialTheme.typography.titleSmall)
-            Text(folderLabel, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = onChooseFolder) { Text("Choose folder") }
-                OutlinedButton(onClick = onRescan) { Text("Rescan") }
+            /* ------------------------------------------------- audio engine */
+            SettingsSection("Audio engine") {
+                SettingTitle(
+                    "Output bit depth",
+                    if (outputBits == 16) "16-bit alt setting, no truncation of 24-bit files"
+                    else "24-bit default · lossless zero-padding for 16-bit sources"
+                )
+                OptionChips(
+                    options = listOf("24-bit (Default)", "16-bit"),
+                    selected = if (outputBits == 16) 1 else 0,
+                    onSelect = { onOutputBits(if (it == 0) 24 else 16) }
+                )
+                Spacer(Modifier.height(14.dp))
+
+                SettingTitle(
+                    "Resampler quality",
+                    when (srcQuality) {
+                        NativeResampler.QUALITY_BEST -> "SRC_SINC_BEST_QUALITY · slowest, most accurate"
+                        NativeResampler.QUALITY_FASTEST -> "SRC_SINC_FASTEST · lowest CPU, wider alias floor"
+                        else -> "SRC_SINC_MEDIUM_QUALITY · default trade-off"
+                    }
+                )
+                OptionChips(
+                    options = listOf("Medium Sinc", "Best Sinc", "Fastest Sinc"),
+                    selected = 1 - srcQuality.coerceIn(0, 2),
+                    onSelect = {
+                        onSrcQuality(
+                            when (it) {
+                                0 -> NativeResampler.QUALITY_MEDIUM
+                                1 -> NativeResampler.QUALITY_BEST
+                                else -> NativeResampler.QUALITY_FASTEST
+                            }
+                        )
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+
+                SwitchRow(
+                    "TPDF dither",
+                    "Triangular dither in the native packer, pre-USB",
+                    dither, onDither
+                )
+                HorizontalDivider()
+                SwitchRow(
+                    "Gapless playback",
+                    "Continue into the next track when the format matches",
+                    gapless, onGapless
+                )
+                HorizontalDivider()
+                SwitchRow(
+                    "Auto-reclaim USB DAC on replug",
+                    "Resume bit-perfect output after the DAC returns",
+                    autoReclaim, onAutoReclaim
+                )
             }
 
-            Spacer(Modifier.height(24.dp))
-            Text("Library", style = MaterialTheme.typography.titleSmall)
-            Text("$trackCount tracks cached", style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onClearCache) { Text("Clear cache") }
+            Spacer(Modifier.height(18.dp))
 
-            Spacer(Modifier.height(24.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Dark theme", style = MaterialTheme.typography.bodyLarge)
-                    Text("Dark by default", style = MaterialTheme.typography.bodySmall)
+            /* --------------------------------------------------- sleep timer */
+            SettingsSection("Sleep timer") {
+                val left = sleepRemainingMs ?: 0L
+                val running = left > 0
+                SettingTitle(
+                    "Pause after",
+                    if (running) {
+                        val s = (left / 1000).toInt()
+                        "Remaining %d:%02d".format(s / 60, s % 60)
+                    } else "Off — playback continues"
+                )
+                OptionChips(
+                    options = listOf("Off", "15 min", "30 min", "45 min", "60 min"),
+                    selected = when (sleepMinutes) {
+                        15 -> 1; 30 -> 2; 45 -> 3; 60 -> 4; else -> 0
+                    },
+                    onSelect = {
+                        onSleepMinutes(
+                            when (it) { 1 -> 15; 2 -> 30; 3 -> 45; 4 -> 60; else -> 0 }
+                        )
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            /* ------------------------------------------- library & appearance */
+            SettingsSection("Library & appearance") {
+                SettingTitle("Theme", "System follows the phone's dark mode")
+                OptionChips(
+                    options = listOf("System", "Dark", "Light"),
+                    selected = when (themeMode) {
+                        ThemeMode.SYSTEM -> 0; ThemeMode.DARK -> 1; ThemeMode.LIGHT -> 2
+                    },
+                    onSelect = {
+                        onThemeMode(
+                            when (it) {
+                                1 -> ThemeMode.DARK
+                                2 -> ThemeMode.LIGHT
+                                else -> ThemeMode.SYSTEM
+                            }
+                        )
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+
+                SwitchRow(
+                    "Dynamic album-art colors",
+                    "Tint Now Playing and the spectrum from the cover",
+                    dynamicColors, onDynamicColors
+                )
+                HorizontalDivider()
+                SwitchRow(
+                    "Skip short tracks (< 30s)",
+                    "Ignore stingers and interludes when scanning",
+                    skipShort, onSkipShort
+                )
+                HorizontalDivider()
+
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    folderLabel.ifEmpty { "No folder selected" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    plural(trackCount, "track") + " cached",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onChooseFolder) { Text("Choose folder") }
+                    OutlinedButton(onClick = onRescan) { Text("Rescan") }
                 }
-                Switch(checked = darkTheme, onCheckedChange = onDarkTheme)
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = onClearCache) { Text("Clear artwork cache") }
             }
 
-            Spacer(Modifier.height(24.dp))
-            Text("About", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "VCHiFiMP — direct USB audio, software volume, bit-perfect when the " +
-                "DAC supports the file's rate.",
-                style = MaterialTheme.typography.bodySmall
+            Spacer(Modifier.height(18.dp))
+
+            /* --------------------------------------------------------- about */
+            SettingsSection("About") {
+                Text("VCHiFiMP  v$version", style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Bit-perfect USB audio · native C engine over raw usbfs · " +
+                    "libsamplerate (BSD-2) for rate conversion · 24-bit/16-bit UAC1 output",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Software volume with TPDF dither · no root, Knox untouched",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(28.dp))
+        }
+    }
+}
+
+/* --------------------------------------------------------- settings atoms */
+
+@Composable
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Text(
+        title.uppercase(),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
+    )
+    Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), content = content)
+    }
+}
+
+@Composable
+private fun SettingTitle(title: String, subtitle: String) {
+    Text(title, style = MaterialTheme.typography.bodyLarge)
+    Text(
+        subtitle,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+@Composable
+private fun OptionChips(
+    options: List<String>,
+    selected: Int,
+    onSelect: (Int) -> Unit
+) {
+    Spacer(Modifier.height(8.dp))
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        options.forEachIndexed { i, label ->
+            FilterChip(
+                selected = i == selected,
+                onClick = { onSelect(i) },
+                label = {
+                    Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             )
         }
+    }
+}
+
+@Composable
+private fun SwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }

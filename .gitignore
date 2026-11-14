@@ -6,3 +6,6 @@ android/build/
 android/app/build/
 android/app/.cxx/
 android/.kotlin/
+
+# release signing
+android/keystore.properties

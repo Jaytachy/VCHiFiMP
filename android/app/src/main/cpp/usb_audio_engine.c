@@ -86,6 +86,7 @@ struct uae {
     size_t head, tail, filled;
 
     float volume;
+    int dither;             /* TPDF dither on/off (default on) */
     double ppm;
     uint64_t rendered;      /* frames packed since open */
     volatile uint64_t frames_done;  /* frames in URBs the kernel has completed */
@@ -375,14 +376,14 @@ static void pack_frames(struct uae *e, unsigned char *dst, const float *src, int
             float v = src[f * e->channels + c] * e->volume * gain;
             unsigned char *p = dst + (f * e->channels + c) * ss;
             if (ss == 2) {
-                double d = v + (frand() - frand()) / 32768.0;
+                double d = e->dither ? v + (frand() - frand()) / 32768.0 : v;
                 long x = lrint(d * 32767.0);
                 if (x > 32767) x = 32767;
                 if (x < -32768) x = -32768;
                 int16_t s = (int16_t)x;
                 memcpy(p, &s, 2);
             } else {
-                double d = v + (frand() - frand()) / 8388608.0;
+                double d = e->dither ? v + (frand() - frand()) / 8388608.0 : v;
                 long x = lrint(d * 8388607.0);
                 if (x > 8388607) x = 8388607;
                 if (x < -8388608) x = -8388608;
@@ -560,6 +561,7 @@ struct uae *uae_open(int fd, int rate, int bits)
     struct uae *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->fd = fd;
+    e->dither = 1;
     e->ctrl_iface = -1;
     e->nifaces = 0;
     pthread_mutex_init(&e->lock, NULL);
@@ -779,6 +781,11 @@ int uae_write(struct uae *e, const float *src, int frames)
         done += (int)n;
     }
     return done;
+}
+
+void uae_set_dither(struct uae *e, int on)
+{
+    if (e) e->dither = on ? 1 : 0;
 }
 
 void uae_set_volume(struct uae *e, float v)

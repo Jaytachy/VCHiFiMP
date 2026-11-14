@@ -28,6 +28,10 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetPpm(handle, ppm)
     }
 
+    fun setDither(on: Boolean) {
+        if (handle != 0L) nativeSetDither(handle, on)
+    }
+
     /** Fixed-order snapshot: urbs, errors, underruns, ring%, rate, bits, alt,
      *  maxpkt, sync, latencyMs, jitter min/avg/max us, framesDone/Packed, filled. */
     fun telemetry(): LongArray = if (handle != 0L) nativeTelemetry(handle) ?: LongArray(0)
@@ -71,6 +75,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeWrite(h: Long, buffer: FloatBuffer, frames: Int): Int
     private external fun nativeSetVolume(h: Long, v: Float)
     private external fun nativeSetPpm(h: Long, ppm: Float)
+    private external fun nativeSetDither(h: Long, on: Boolean)
     private external fun nativeEos(h: Long)
     private external fun nativeFramesPlayed(h: Long): Long
     private external fun nativeBufferedFrames(h: Long): Long
