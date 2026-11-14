@@ -10,6 +10,7 @@ import android.content.ServiceConnection
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -174,11 +175,27 @@ class MainActivity : ComponentActivity() {
                     if (usbManager.hasPermission(d)) attachDac(d) else requestUsb(d)
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    // Freeze on the track that is playing before the engine
+                    // notices the device is gone, then drop the stale device.
+                    service?.onUsbDetached()
+                    service?.setDevice(null)
+                    pendingPlay = null
                     dacName = ""
                     exclusive = false
-                    service?.setExclusive(false)
-                    Log.i("VCProbe", "DAC detached -> phone audio")
+                    Log.i("VCProbe", "DAC detached -> paused on current track")
                 }
+            }
+        }
+    }
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) return
+            // Output route disappeared (USB, wired headset, Bluetooth): pause
+            // instead of blasting the speaker.
+            if (service?.state?.value?.playing == true) {
+                Log.i("VCProbe", "becoming noisy -> pause")
+                service?.pause()
             }
         }
     }
@@ -202,6 +219,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra("detach", false)) {
+            Log.i("VCProbe", "debug: simulated DAC detach (new intent)")
+            service?.onUsbDetached()
+            service?.setDevice(null)
+            dacName = ""
+            exclusive = false
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
@@ -216,6 +245,10 @@ class MainActivity : ComponentActivity() {
             flags
         )
         favorites = Favorites.load(this)
+        registerReceiver(
+            noisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), flags
+        )
 
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
 
@@ -251,6 +284,23 @@ class MainActivity : ComponentActivity() {
         }
 
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
+            if (intent?.getBooleanExtra("playall", false) == true) {
+                playList(tracks, intent?.getIntExtra("trackIndex", 0) ?: 0)
+            }
+            if (intent?.getBooleanExtra("resume", false) == true) service?.resume()
+            if (intent?.getBooleanExtra("detach", false) == true) {
+                Log.i("VCProbe", "debug: simulated DAC detach")
+                service?.onUsbDetached()
+                service?.setDevice(null)
+                dacName = ""
+                exclusive = false
+            }
+            if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
+            if (intent?.getBooleanExtra("playall", false) == true) {
+                playList(tracks, intent?.getIntExtra("trackIndex", 0) ?: 0)
+            }
+            if (intent?.getBooleanExtra("resume", false) == true) service?.resume()
             when (intent?.getStringExtra("detail")) {
                 "album" -> albums.firstOrNull {
                     ArtStore.existing(this, it.name, it.artist) != null
@@ -685,6 +735,7 @@ class MainActivity : ComponentActivity() {
         cancelScan.set(true)
         runCatching { unregisterReceiver(permissionReceiver) }
         runCatching { unregisterReceiver(usbEvents) }
+        runCatching { unregisterReceiver(noisyReceiver) }
         runCatching { unbindService(conn) }
     }
 

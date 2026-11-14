@@ -170,11 +170,39 @@ class PlaybackService : Service() {
 
     // ------------------------------------------------------------- transport
 
-    fun setDevice(d: UsbDevice, outputBits: Int, startVolume: Float) {
+    fun setDevice(d: UsbDevice?, outputBits: Int = bits, startVolume: Float = volume) {
         device = d
         bits = outputBits
         volume = startVolume
         player.setVolume(startVolume)
+        if (d == null) exclusive = false
+    }
+
+    /**
+     * The DAC was unplugged mid-playback. Freeze on the track that is actually
+     * playing: snapshot the audible frame, tear the engine down without letting
+     * the "track finished" path run, and forget the device. Pressing Play then
+     * resumes this track on the platform mixer, not some earlier one.
+     */
+    fun onUsbDetached() {
+        val pos = player.positionMs()
+        val wasPlaying = _state.value.playing
+        if (pos > 0 && index >= 0) pausedAtMs = pos
+        Log.i("VCProbe", "DAC detached: idx=$index title='${_state.value.title}' pos=$pos wasPlaying=$wasPlaying")
+        suppressFinish = true
+        player.stop()
+        suppressFinish = false
+        device = null
+        exclusive = false
+        _state.value = _state.value.copy(
+            playing = false,
+            paused = wasPlaying || _state.value.paused,
+            positionMs = if (pos > 0) pos else _state.value.positionMs,
+            error = null
+        )
+        publish(if (_state.value.paused) PlaybackState.STATE_PAUSED
+                else PlaybackState.STATE_NONE)
+        if (wasPlaying) startForegroundInternal(_state.value.title)
     }
 
     fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
@@ -375,6 +403,7 @@ class PlaybackService : Service() {
 
     /** The seam is now audible: flip metadata without touching the stream. */
     private fun commitBoundary(idx: Int) {
+        if (!_state.value.playing) return
         val t = queue.getOrNull(idx) ?: return
         index = idx
         pausedAtMs = 0

@@ -46,6 +46,8 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
     @Volatile private var session = 0
+    /** Last position reported from reaped URBs; used to snapshot on DAC detach. */
+    @Volatile private var lastReportedPosition = 0L
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -67,6 +69,7 @@ class UsbDirectPlayer(private val context: Context) {
               startMs: Long = 0L, useMixer: Boolean = false) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
+        lastReportedPosition = startMs
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
         onFormat?.invoke(dev, bits)
@@ -290,6 +293,9 @@ class UsbDirectPlayer(private val context: Context) {
         }
     }
 
+    /** Audible position of the current track, from reaped URBs. */
+    fun positionMs(): Long = lastReportedPosition
+
     fun setVolume(v: Float) {
         mixerVolume = v
         engine?.setVolume(v)
@@ -368,7 +374,8 @@ class UsbDirectPlayer(private val context: Context) {
             Log.i("VCProbe", "track mime=$mime rate=$srcRate ch=$srcCh")
 
             if (sink == null) {
-                sink = PcmSink(target, srcRate, outRate, srcCh, currentStart, onProgress,
+                sink = PcmSink(target, srcRate, outRate, srcCh, currentStart,
+                    progress = { ms -> lastReportedPosition = ms; onProgress?.invoke(ms) },
                     tap = { b, n ->
                         analyzer.delayFrames = target.bufferedFrames()
                         analyzer.offer(b, n, mixerVolume)
@@ -521,7 +528,8 @@ class UsbDirectPlayer(private val context: Context) {
             }
             bytes.position(0)
             bytes.limit(frames * 8)          // 2 ch * 4 bytes
-            return track.write(bytes, frames * 8, AudioTrack.WRITE_BLOCKING)
+            val written = track.write(bytes, frames * 8, AudioTrack.WRITE_BLOCKING)
+            return if (written <= 0) written else written / 8   // bytes -> frames
         }
         override fun eos() { /* nothing queued to flush */ }
         override fun playedFrames(): Long =
@@ -561,6 +569,7 @@ class UsbDirectPlayer(private val context: Context) {
 
         private var lastReportMs = 0L
         private var framesOut = 0L
+        private var lastPlayedMs = 0L
         private var boundaryFrame = 0L
         private var pendingBoundary = -1
         private var trackStartFrames = 0L
@@ -641,8 +650,14 @@ class UsbDirectPlayer(private val context: Context) {
             outBuf.limit(frames * 2)
             val start = framesOut
             tap?.invoke(outBuf, frames)
-            target.write(outBuf, outBytes, frames)
+            val wrote = target.write(outBuf, outBytes, frames)
             outBuf.clear()
+            if (wrote <= 0) {
+                // The DAC vanished (or the mixer died). Without this the loop
+                // keeps "writing" into nothing, reaches EOF normally, and the
+                // service treats it as a finished track and advances the queue.
+                throw IllegalStateException("sink write failed ($wrote/$frames)")
+            }
             framesOut += frames
 
             val played = target.playedFrames()
@@ -655,6 +670,7 @@ class UsbDirectPlayer(private val context: Context) {
             val rel = played - trackStartFrames
             val base = if (trackStartFrames > 0) 0L else startMs
             val ms = base + rel * 1000L / outRate
+            lastPlayedMs = ms
             if (ms - lastReportMs >= 200 || ms < lastReportMs) {
                 lastReportMs = ms
                 progress?.invoke(ms)
