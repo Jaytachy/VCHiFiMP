@@ -6,7 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.Context
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -71,6 +74,10 @@ class PlaybackService : Service() {
     private val binder = LocalBinder()
     private val _state = MutableStateFlow(TransportState())
     private val _queueFlow = MutableStateFlow<List<Track>>(emptyList())
+    private val _deviceName = MutableStateFlow<String?>(null)
+    val deviceName: StateFlow<String?> = _deviceName.asStateFlow()
+    private val _exclusiveState = MutableStateFlow(true)
+    val exclusiveState: StateFlow<Boolean> = _exclusiveState.asStateFlow()
     private val _lastPlayed = MutableStateFlow<LastPlayed?>(null)
     val lastPlayed: StateFlow<LastPlayed?> = _lastPlayed.asStateFlow()
     val queueFlow: StateFlow<List<Track>> = _queueFlow.asStateFlow()
@@ -94,6 +101,10 @@ class PlaybackService : Service() {
     private var exclusive = true
     private var hardwareVolume = false
     @Volatile private var suppressFinish = false
+    /** Set when the DAC was unplugged; the next start tries to re-acquire it. */
+    @Volatile private var deviceLost = false
+    /** True when the user deliberately picked mixer mode; never auto-claim then. */
+    @Volatile private var mixerByUser = false
 
     inner class LocalBinder : Binder() {
         fun service(): PlaybackService = this@PlaybackService
@@ -175,7 +186,9 @@ class PlaybackService : Service() {
         bits = outputBits
         volume = startVolume
         player.setVolume(startVolume)
-        if (d == null) exclusive = false
+        _deviceName.value = d?.productName
+        if (d != null) deviceLost = false else exclusive = false
+        _exclusiveState.value = exclusive
     }
 
     /**
@@ -194,6 +207,9 @@ class PlaybackService : Service() {
         suppressFinish = false
         device = null
         exclusive = false
+        deviceLost = true
+        _deviceName.value = null
+        _exclusiveState.value = false
         _state.value = _state.value.copy(
             playing = false,
             paused = wasPlaying || _state.value.paused,
@@ -301,8 +317,19 @@ class PlaybackService : Service() {
     fun playAt(i: Int, fromMs: Long = 0L) {
         Log.i("VCProbe", "playAt($i, fromMs=$fromMs)")
         val t = queue.getOrNull(i) ?: return
-        // No claimed device (no DAC, or permission not granted yet): fall back to
-        // the platform mixer rather than silently swallowing the user's tap.
+        // If the DAC was unplugged earlier and has come back (same queue, queue
+        // advance, resume), take it again. Without this the whole queue stayed
+        // on the mixer until a fresh album rebuilt the device.
+        if (device == null && deviceLost && !mixerByUser) {
+            findAttachedDac()?.let {
+                Log.i("VCProbe", "re-acquired DAC: ${it.productName}")
+                device = it
+                exclusive = true
+                deviceLost = false
+                _deviceName.value = it.productName
+                _exclusiveState.value = true
+            }
+        }
         val d = device
         val mixer = !exclusive || d == null
         index = i
@@ -387,7 +414,11 @@ class PlaybackService : Service() {
     }
 
     /** true = take the device over (bit-perfect). false = Android's mixer. */
-    fun setExclusive(on: Boolean) { exclusive = on }
+    fun setExclusive(on: Boolean) {
+        exclusive = on
+        mixerByUser = !on
+        _exclusiveState.value = on
+    }
 
     /** Next track in play order, without committing to it yet. */
     private fun peekNextForGapless(): Pair<Int, Track>? {
@@ -417,6 +448,16 @@ class PlaybackService : Service() {
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
         Log.i("VCProbe", "gapless boundary -> ${t.title}")
+    }
+
+    /** A permitted audio-class USB device, or null. */
+    private fun findAttachedDac(): UsbDevice? {
+        val mgr = getSystemService(Context.USB_SERVICE) as UsbManager
+        return mgr.deviceList.values.firstOrNull { d ->
+            (0 until d.interfaceCount).any {
+                d.getInterface(it).interfaceClass == UsbConstants.USB_CLASS_AUDIO
+            }
+        }?.takeIf { mgr.hasPermission(it) }
     }
 
     /** Drop a vanished file from the queue and keep playing around it. */

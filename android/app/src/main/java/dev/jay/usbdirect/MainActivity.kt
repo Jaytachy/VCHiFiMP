@@ -90,6 +90,8 @@ class MainActivity : ComponentActivity() {
                 svc.setExclusive(false)
                 dacName = ""
             }
+            lifecycleScope.launch { svc.deviceName.collect { dacName = it ?: "" } }
+            lifecycleScope.launch { svc.exclusiveState.collect { exclusive = it } }
             lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
             lifecycleScope.launch {
                 var lastMissing: String? = null
@@ -171,8 +173,18 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(ctx: Context, intent: Intent) {
             when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    val d = audioDevice() ?: return
-                    if (usbManager.hasPermission(d)) attachDac(d) else requestUsb(d)
+                    // The broadcast can arrive before the device shows up in
+                    // deviceList, so retry briefly instead of giving up.
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    fun tryAttach(attempt: Int) {
+                        val d = audioDevice()
+                        if (d == null) {
+                            if (attempt < 6) handler.postDelayed({ tryAttach(attempt + 1) }, 250)
+                            return
+                        }
+                        if (usbManager.hasPermission(d)) attachDac(d) else requestUsb(d)
+                    }
+                    tryAttach(0)
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     // Freeze on the track that is playing before the engine
