@@ -141,20 +141,35 @@ class AudioAnalyzer {
 
         fft(real, imag)
 
+        // band edges depend on the device rate, so rebuild when it changes
+        if (bandRate != sampleRate) rebuildBands(sampleRate)
+
         // magnitude -> dB, scaled so a full-scale sine reads 0 dB
         val scale = 4.0f / FFT_N
+        val raw = FloatArray(BANDS)
         for (b in 0 until BANDS) {
-            var m = 0f
+            // RMS across the band instead of max: at 5.9 Hz resolution the
+            // bass bands hold only one or two bins, and max made them jump.
+            var sum = 0f
             for (k in bandLo[b] until bandHi[b]) {
                 val re = real[k]; val im = imag[k]
                 val mag = sqrt(re * re + im * im) * scale
-                if (mag > m) m = mag
+                sum += mag * mag
             }
-            val db = if (m <= 1e-7f) -100f else max(-100f, 20f * log10(m))
-            // fast attack, slow release
-            // per-tick coefficients: ~120 updates/s now, so the release is
-            // shorter per frame to keep the same visible decay time
-            smoothed[b] = if (db > smoothed[b]) db else smoothed[b] - (smoothed[b] - db) * 0.13f
+            val count = (bandHi[b] - bandLo[b]).coerceAtLeast(1)
+            val m = sqrt(sum / count)
+            raw[b] = if (m <= 1e-7f) -100f else max(-100f, 20f * log10(m))
+        }
+        for (b in 0 until BANDS) {
+            // 1-2-1 spatial smoothing so a kick does not spike a single band
+            val lo = raw[(b - 1).coerceAtLeast(0)]
+            val hi = raw[(b + 1).coerceAtMost(BANDS - 1)]
+            val db = (lo + 2f * raw[b] + hi) / 4f
+            smoothed[b] = if (db > smoothed[b]) {
+                smoothed[b] + (db - smoothed[b]) * 0.55f
+            } else {
+                smoothed[b] - (smoothed[b] - db) * 0.13f
+            }
         }
 
         val peakDb = if (peak <= 1e-5f) -100f else 20f * log10(peak)
