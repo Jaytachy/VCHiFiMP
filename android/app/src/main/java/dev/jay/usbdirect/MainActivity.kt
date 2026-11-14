@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
     private var darkTheme by mutableStateOf(true)
     private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
-    private var pendingAlbum: Pair<LibAlbum, Int>? = null
+    private var pendingPlay: Pair<List<Track>, Int>? = null
     private var pendingDebug: Track? = null
     private val cancelScan = AtomicBoolean(false)
     private var scanGen = 0
@@ -99,8 +99,12 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val d = audioDevice() ?: return
-            val p = pendingAlbum
-            if (p != null) { pendingAlbum = null; startAlbum(p.first, p.second, d) }
+            val p = pendingPlay
+            if (p != null) {
+                pendingPlay = null
+                service?.setDevice(d, 24, volume)
+                service?.setQueue(p.first, p.second)
+            }
         }
     }
 
@@ -238,10 +242,12 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Tab.MUSIC -> MusicScreen(
                                     albums = albums,
+                                    tracks = tracks,
                                     scanning = scanning,
                                     scanState = scanState,
                                     artVersion = artVersion,
                                     onOpenAlbum = { openAlbum = it },
+                                    onPlayList = { list, i -> playList(list, i) },
                                     onChooseFolder = { picker.launch(null) },
                                     onRescan = {
                                         getPreferences(MODE_PRIVATE).getString("tree", null)
@@ -326,7 +332,7 @@ class MainActivity : ComponentActivity() {
                                  if (t.sampleRate > 0) "  ·  ${t.sampleRate / 1000} kHz" else "")
                         },
                         modifier = Modifier.clickable {
-                            playAlbum(album, album.tracks.indexOf(t))
+                            playList(album.tracks, album.tracks.indexOf(t))
                         }
                     )
                 }
@@ -336,17 +342,18 @@ class MainActivity : ComponentActivity() {
 
     /* ---------------------------------------------------------- playback */
 
-    private fun playAlbum(a: LibAlbum, index: Int) {
+    private fun playList(list: List<LibTrack>, index: Int) {
+        if (list.isEmpty()) return
         val d = audioDevice()
         if (d == null) { dacName = "no USB DAC plugged in"; return }
-        if (usbManager.hasPermission(d)) startAlbum(a, index, d)
-        else { pendingAlbum = a to index; requestUsb(d) }
-    }
-
-    private fun startAlbum(a: LibAlbum, index: Int, d: UsbDevice) {
-        val svc = service ?: return
-        svc.setDevice(d, 24, volume)
-        svc.setQueue(a.tracks.map { it.toQueueTrack() }, index)
+        val q = list.map { it.toQueueTrack() }
+        if (usbManager.hasPermission(d)) {
+            service?.setDevice(d, 24, volume)
+            service?.setQueue(q, index)
+        } else {
+            pendingPlay = q to index
+            requestUsb(d)
+        }
     }
 
     private fun shuffleAll() {

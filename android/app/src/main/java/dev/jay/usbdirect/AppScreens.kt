@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
@@ -50,6 +51,8 @@ fun rememberTransport(flow: StateFlow<TransportState>?): TransportState {
     val f = remember(flow) { flow ?: flowOf(TransportState()) }
     return f.collectAsState(TransportState()).value
 }
+
+fun plural(n: Int, word: String): String = if (n == 1) "1 $word" else "$n ${word}s"
 
 fun fmtTime(ms: Long): String {
     if (ms <= 0) return "-:--"
@@ -238,35 +241,258 @@ fun HomeScreen(
 @Composable
 fun MusicScreen(
     albums: List<LibAlbum>,
+    tracks: List<LibTrack>,
     scanning: Boolean,
     scanState: String,
     artVersion: Int,
     onOpenAlbum: (LibAlbum) -> Unit,
+    onPlayList: (List<LibTrack>, Int) -> Unit,
     onChooseFolder: () -> Unit,
     onRescan: () -> Unit
+) {
+    var section by remember { mutableStateOf(LibSection.SONGS) }
+    var grid by remember { mutableStateOf(true) }
+    var sort by remember { mutableStateOf(SortBy.TITLE) }
+    var artistFilter by remember { mutableStateOf<String?>(null) }
+
+    val sortedTracks = remember(tracks, sort) {
+        when (sort) {
+            SortBy.TITLE -> tracks.sortedBy { it.title.lowercase() }
+            SortBy.ARTIST -> tracks.sortedWith(compareBy({ it.artist.lowercase() }, { it.album.lowercase() }, { it.trackNo }))
+            SortBy.ALBUM -> tracks.sortedWith(compareBy({ it.album.lowercase() }, { it.trackNo }))
+            SortBy.DURATION -> tracks.sortedByDescending { it.durationMs }
+        }
+    }
+    val sortedAlbums = remember(albums, sort) {
+        when (sort) {
+            SortBy.ARTIST -> albums.sortedBy { it.artist.lowercase() }
+            SortBy.DURATION -> albums.sortedByDescending { it.durationMs }
+            else -> albums.sortedBy { it.name.lowercase() }
+        }
+    }
+    val artists = remember(tracks) {
+        tracks.groupBy { it.artist.ifEmpty { "Unknown artist" } }
+            .map { (name, list) -> Triple(name, list, list.map { it.album }.distinct().size) }
+    }
+    val sortedArtists = remember(artists, sort) {
+        when (sort) {
+            SortBy.DURATION -> artists.sortedByDescending { it.second.size }
+            else -> artists.sortedBy { it.first.lowercase() }
+        }
+    }
+
+    // artist drill-down
+    val af = artistFilter
+    if (af != null) {
+        ArtistDetail(
+            name = af,
+            tracks = sortedTracks.filter { it.artist.ifEmpty { "Unknown artist" } == af },
+            onBack = { artistFilter = null },
+            onPlayList = onPlayList
+        )
+        return
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Library", style = MaterialTheme.typography.headlineMedium,
+                     modifier = Modifier.weight(1f))
+                TextButton(onClick = onChooseFolder) { Text("Folder") }
+                TextButton(onClick = onRescan, enabled = !scanning) { Text("Rescan") }
+            }
+            Text(scanState, style = MaterialTheme.typography.bodySmall,
+                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            Spacer(Modifier.height(10.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                LibSection.entries.forEachIndexed { i, sec ->
+                    SegmentedButton(
+                        selected = section == sec,
+                        onClick = { section = sec },
+                        shape = SegmentedButtonDefaults.itemShape(i, LibSection.entries.size)
+                    ) { Text(sec.label) }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                var menu by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { menu = true }) {
+                        Text("Sort: ${sort.label}")
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        SortBy.entries.forEach { sb ->
+                            DropdownMenuItem(
+                                text = { Text(sb.label) },
+                                onClick = { sort = sb; menu = false }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (section == LibSection.ALBUMS) {
+                    TextButton(onClick = { grid = !grid }) {
+                        Text(if (grid) "List view" else "Grid view")
+                    }
+                }
+            }
+        }
+
+        when (section) {
+            LibSection.SONGS -> SongList(sortedTracks, onPlayList)
+            LibSection.ALBUMS -> if (grid) {
+                AlbumGrid(sortedAlbums, artVersion, albums.size, onOpenAlbum)
+            } else {
+                AlbumList(sortedAlbums, artVersion, onOpenAlbum)
+            }
+            LibSection.ARTISTS -> ArtistList(sortedArtists) { artistFilter = it }
+        }
+    }
+}
+
+private enum class LibSection(val label: String) { SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists") }
+
+private enum class SortBy(val label: String) {
+    TITLE("Title"), ARTIST("Artist"), ALBUM("Album"), DURATION("Duration")
+}
+
+@Composable
+private fun SongList(tracks: List<LibTrack>, onPlayList: (List<LibTrack>, Int) -> Unit) {
+    if (tracks.isEmpty()) {
+        Text("No tracks. Choose a folder.", Modifier.padding(20.dp),
+             style = MaterialTheme.typography.bodyMedium,
+             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        itemsIndexed(tracks) { i, t ->
+            ListItem(
+                headlineContent = { Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                supportingContent = {
+                    Text(
+                        listOfNotNull(
+                            t.artist.ifEmpty { null },
+                            fmtTime(t.durationMs),
+                            if (t.bitDepth > 0) "${t.bitDepth}-bit" else null
+                        ).joinToString("  ·  "),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier.clickable { onPlayList(tracks, i) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun AlbumGrid(
+    albums: List<LibAlbum>,
+    artVersion: Int,
+    total: Int,
+    onOpenAlbum: (LibAlbum) -> Unit
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        item(span = { GridItemSpan(2) }) {
-            Column {
-                Text("Library", style = MaterialTheme.typography.headlineMedium)
-                Text(scanState, style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onChooseFolder) { Text("Choose folder") }
-                    OutlinedButton(onClick = onRescan, enabled = !scanning) { Text("Rescan") }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-        }
         items(albums, key = { it.name + it.artist }) { a ->
             AlbumCard(a, artVersion) { onOpenAlbum(a) }
         }
+        item(span = { GridItemSpan(2) }) { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
+@Composable
+private fun AlbumList(albums: List<LibAlbum>, artVersion: Int, onOpenAlbum: (LibAlbum) -> Unit) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(albums, key = { it.name + it.artist }) { a ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onOpenAlbum(a) }
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AlbumThumb(a, artVersion, 52)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                         style = MaterialTheme.typography.bodyLarge)
+                    Text("${a.artist}  ·  ${plural(a.tracks.size, "track")}",
+                         maxLines = 1, overflow = TextOverflow.Ellipsis,
+                         style = MaterialTheme.typography.bodySmall,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumThumb(album: LibAlbum, artVersion: Int, size: Int) {
+    val ctx = LocalContext.current
+    val key = album.name + "\u0000" + album.artist
+    var bitmap by remember(key, artVersion) {
+        mutableStateOf(ArtCache.peek(album.name, album.artist))
+    }
+    LaunchedEffect(key, artVersion) {
+        if (bitmap == null) bitmap = ArtCache.load(ctx, album.name, album.artist)
+    }
+    Box(
+        Modifier.size(size.dp).clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        val b = bitmap
+        if (b != null) {
+            Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else {
+            Text(album.name.take(1).uppercase(), style = MaterialTheme.typography.titleMedium,
+                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun ArtistList(
+    artists: List<Triple<String, List<LibTrack>, Int>>,
+    onPick: (String) -> Unit
+) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        itemsIndexed(artists) { _, a ->
+            ListItem(
+                headlineContent = { Text(a.first, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                supportingContent = {
+                    Text("${plural(a.second.size, "track")}  ·  ${plural(a.third, "album")}")
+                },
+                modifier = Modifier.clickable { onPick(a.first) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtistDetail(
+    name: String,
+    tracks: List<LibTrack>,
+    onBack: () -> Unit,
+    onPlayList: (List<LibTrack>, Int) -> Unit
+) {
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("‹ Library") }
+            Column(Modifier.weight(1f)) {
+                Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                     style = MaterialTheme.typography.titleMedium)
+                Text(plural(tracks.size, "track"), style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        SongList(tracks, onPlayList)
     }
 }
 
