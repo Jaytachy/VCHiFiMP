@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +49,7 @@ class MainActivity : ComponentActivity() {
     private var tab by mutableStateOf(Tab.HOME)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var folderLabel by mutableStateOf("")
+    private var artVersion by mutableStateOf(0)
 
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
@@ -127,6 +129,7 @@ class MainActivity : ComponentActivity() {
             scanState = "pick a folder to start"
         }
         dacName = audioDevice()?.productName ?: ""
+        Log.i("VCProbe", "tab extra=" + (intent?.getStringExtra("tab") ?: "none"))
         when (intent?.getStringExtra("tab")) {
             "music" -> tab = Tab.MUSIC
             "output" -> tab = Tab.OUTPUT
@@ -198,6 +201,7 @@ class MainActivity : ComponentActivity() {
                                     albums = albums,
                                     scanning = scanning,
                                     scanState = scanState,
+                                    artVersion = artVersion,
                                     onOpenAlbum = { openAlbum = it },
                                     onChooseFolder = { picker.launch(null) },
                                     onRescan = {
@@ -340,18 +344,36 @@ class MainActivity : ComponentActivity() {
                 cancel = cancelScan
             )
             LibraryStore.save(this, tree, found)
+            val grouped = LibraryScanner.albums(found)
+
+            // publish first, then fill in artwork behind it
             runOnUiThread {
                 if (gen != scanGen) return@runOnUiThread
                 tracks = found
-                albums = LibraryScanner.albums(found)
+                albums = grouped
                 scanning = false
-                scanState = "${found.size} tracks, ${albums.size} albums"
+                scanState = "${found.size} tracks, ${grouped.size} albums"
                 dacName = audioDevice()?.productName ?: ""
-        when (intent?.getStringExtra("tab")) {
-            "music" -> tab = Tab.MUSIC
-            "output" -> tab = Tab.OUTPUT
-            "settings" -> tab = Tab.SETTINGS
-        }
+            }
+
+            var done = 0
+            for (a in grouped) {
+                if (cancelScan.get() || gen != scanGen) break
+                val first = a.tracks.firstOrNull() ?: continue
+                ArtStore.extract(this, a.name, a.artist, first.uri)
+                done++
+                if (done % 6 == 0) runOnUiThread {
+                    if (gen == scanGen) {
+                        artVersion++
+                        scanState = "artwork  $done/${grouped.size}"
+                    }
+                }
+            }
+            runOnUiThread {
+                if (gen == scanGen) {
+                    artVersion++
+                    scanState = "${found.size} tracks, ${grouped.size} albums"
+                }
             }
         }.start()
     }

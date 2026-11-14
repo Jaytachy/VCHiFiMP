@@ -14,7 +14,8 @@ data class LibTrack(
     val album: String,
     val trackNo: Int,
     val durationMs: Long,
-    val sampleRate: Int
+    val sampleRate: Int,
+    val bitDepth: Int = 0
 ) {
     fun toQueueTrack() = Track(uri, title, durationMs)
 }
@@ -117,7 +118,7 @@ object LibraryScanner {
                 // retriever does not always report these; leave 0 and let
                 // playback probe the real value
             }
-            LibTrack(uri, title, artist, album, trackNo, durMs, rate)
+            LibTrack(uri, title, artist, album, trackNo, durMs, rate, bits)
         } catch (t: Throwable) {
             Log.w("VCProbe", "tag failed for $uri: ${t.message}")
             null

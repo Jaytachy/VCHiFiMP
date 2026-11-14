@@ -1,6 +1,14 @@
 package dev.jay.usbdirect
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,9 +22,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.graphics.BitmapFactory
 
 enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
@@ -208,29 +221,103 @@ fun MusicScreen(
     albums: List<LibAlbum>,
     scanning: Boolean,
     scanState: String,
+    artVersion: Int,
     onOpenAlbum: (LibAlbum) -> Unit,
     onChooseFolder: () -> Unit,
     onRescan: () -> Unit
 ) {
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        item {
-            Spacer(Modifier.height(24.dp))
-            Text("Library", style = MaterialTheme.typography.headlineMedium)
-            Text(scanState, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = onChooseFolder) { Text("Choose folder") }
-                OutlinedButton(onClick = onRescan, enabled = !scanning) { Text("Rescan") }
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item(span = { GridItemSpan(2) }) {
+            Column {
+                Text("Library", style = MaterialTheme.typography.headlineMedium)
+                Text(scanState, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = onChooseFolder) { Text("Choose folder") }
+                    OutlinedButton(onClick = onRescan, enabled = !scanning) { Text("Rescan") }
+                }
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(16.dp))
         }
         items(albums, key = { it.name + it.artist }) { a ->
-            ListItem(
-                headlineContent = { Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                supportingContent = { Text("${a.artist}  ·  ${a.tracks.size} tracks") },
-                modifier = Modifier.clickable { onOpenAlbum(a) }
-            )
+            AlbumCard(a, artVersion) { onOpenAlbum(a) }
         }
+    }
+}
+
+@Composable
+private fun AlbumCard(album: LibAlbum, artVersion: Int, onClick: () -> Unit) {
+    val ctx = LocalContext.current
+    val art = remember(album.name, album.artist, artVersion) {
+        ArtStore.existing(ctx, album.name, album.artist)
+    }
+    val bitmap = remember(art) {
+        art?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
+    }
+    val bits = album.tracks.firstOrNull()?.bitDepth ?: 0
+
+    Column(Modifier.clickable { onClick() }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap, contentDescription = album.name,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Text(
+                    album.name.take(1).uppercase(),
+                    style = MaterialTheme.typography.displaySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
+
+            if (bits > 0) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
+                ) {
+                    Text(
+                        "$bits-bit",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                tonalElevation = 4.dp
+            ) {
+                Icon(
+                    Icons.Default.PlayArrow, contentDescription = "Play",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.padding(6.dp).size(20.dp)
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(album.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+             style = MaterialTheme.typography.bodyMedium)
+        Text(album.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
+             style = MaterialTheme.typography.bodySmall,
+             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -38,7 +38,8 @@ object LibraryStore {
                         album = o.getString("album"),
                         trackNo = o.optInt("trackNo"),
                         durationMs = o.optLong("durationMs"),
-                        sampleRate = o.optInt("sampleRate")
+                        sampleRate = o.optInt("sampleRate"),
+                        bitDepth = o.optInt("bitDepth")
                     )
                 )
             }
@@ -63,6 +64,7 @@ object LibraryStore {
                         put("trackNo", t.trackNo)
                         put("durationMs", t.durationMs)
                         put("sampleRate", t.sampleRate)
+                        put("bitDepth", t.bitDepth)
                     }
                 )
             }
