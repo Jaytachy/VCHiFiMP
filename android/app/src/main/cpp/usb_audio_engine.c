@@ -93,6 +93,8 @@ struct uae {
     volatile int eos;       /* producer says: no more samples coming */
     unsigned cfgval;
     int ctrl_iface;
+    int ifaces[16];
+    int nifaces;
 
     volatile int running;
     volatile int failed;
@@ -413,6 +415,7 @@ struct uae *uae_open(int fd, int rate, int bits)
     if (!e) return NULL;
     e->fd = fd;
     e->ctrl_iface = -1;
+    e->nifaces = 0;
     pthread_mutex_init(&e->lock, NULL);
     pthread_cond_init(&e->can_read, NULL);
     pthread_cond_init(&e->can_write, NULL);
@@ -469,13 +472,21 @@ struct uae *uae_open(int fd, int rate, int bits)
     for (int i = 0; i + 1 < total; ) {
         int len = cfg[i], type = cfg[i + 1];
         if (len < 2 || i + len > total) break;
+        if (type == USB_DT_INTERFACE && e->nifaces < 16) {
+            e->ifaces[e->nifaces++] = cfg[i + 2];
+        }
         if (type == USB_DT_INTERFACE) {
-            struct usbdevfs_ioctl ctl;
-            memset(&ctl, 0, sizeof(ctl));
-            ctl.ifno = cfg[i + 2];
-            ctl.ioctl_code = USBDEVFS_DISCONNECT;
-            ctl.data = NULL;
-            if (ioctl(fd, USBDEVFS_IOCTL, &ctl) == 0) swept++;
+            /* Audio interfaces only: HID (inline remotes) is a different
+             * driver and has no reason to be evicted with us. */
+            int icls = cfg[i + 5];
+            if (icls == 0x01) {
+                struct usbdevfs_ioctl ctl;
+                memset(&ctl, 0, sizeof(ctl));
+                ctl.ifno = cfg[i + 2];
+                ctl.ioctl_code = USBDEVFS_DISCONNECT;
+                ctl.data = NULL;
+                if (ioctl(fd, USBDEVFS_IOCTL, &ctl) == 0) swept++;
+            }
         }
         i += len;
     }
@@ -620,8 +631,6 @@ void uae_close(struct uae *e)
     pthread_mutex_unlock(&e->lock);
     if (e->started) pthread_join(e->thread, NULL);
 
-    /* Drop our claims and alt setting first: SETCONFIGURATION is refused while
-     * anyone (including us) holds an interface. */
     struct usbdevfs_setinterface si0;
     si0.interface = (unsigned)e->iface;
     si0.altsetting = 0;
@@ -634,14 +643,25 @@ void uae_close(struct uae *e)
         ioctl(e->fd, USBDEVFS_RELEASEINTERFACE, &ac);
     }
 
-    /* Re-issue SETCONFIGURATION so the kernel re-probes the interfaces and
-     * snd-usb-audio rebinds. Without this, Android's own USB audio stays dead
-     * until the user replugs the DAC. */
-    unsigned int cv = e->cfgval;
-    if (ioctl(e->fd, USBDEVFS_SETCONFIGURATION, &cv) < 0)
-        LOGE("uae: restore SETCONFIGURATION failed: %s", strerror(errno));
-    else
-        LOGI("uae: configuration re-issued, kernel drivers should rebind");
+    /* Hand the interfaces back to the kernel with USBDEVFS_CONNECT, which asks
+     * normal driver matching to rebind (snd-usb-audio). SETCONFIGURATION was
+     * the wrong tool here: usb_set_configuration() re-registers every
+     * interface, which invalidated our usbfs fd mid-teardown (EBADF) and is
+     * also refused outright while the HID interface is still claimed. */
+    /* CONNECT every interface, not just the ones we claimed: the HID remote
+     * and the capture interface were evicted by earlier sessions and would
+     * otherwise stay dead until the user replugs the DAC. */
+    int reconnected = 0;
+    for (int i = 0; i < e->nifaces; i++) {
+        struct usbdevfs_ioctl ctl;
+        memset(&ctl, 0, sizeof(ctl));
+        ctl.ifno = (unsigned)e->ifaces[i];
+        ctl.ioctl_code = USBDEVFS_CONNECT;
+        ctl.data = NULL;
+        if (ioctl(e->fd, USBDEVFS_IOCTL, &ctl) == 0) reconnected++;
+    }
+    LOGI("uae: handed back, rebind requested for %d/%d interfaces",
+         reconnected, e->nifaces);
 
     free(e->ring);
     pthread_mutex_destroy(&e->lock);
