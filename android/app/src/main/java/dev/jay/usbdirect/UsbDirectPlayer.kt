@@ -42,6 +42,7 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile private var mixerVolume = 0.2f
     @Volatile private var running = false
     @Volatile private var session = 0
+    @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
     private var connection: UsbDeviceConnection? = null
@@ -151,32 +152,44 @@ class UsbDirectPlayer(private val context: Context) {
 
     private fun startInternal(device: UsbDevice, rate: Int, bits: Int, volume: Float,
                               body: (UsbAudioEngine) -> Unit) {
-        // Fast path: same DAC, interface still ours, and it supports the new
-        // format. Switch rate/alt in place instead of a full teardown.
+        // Fast path: same DAC, interface still ours. Stop the OLD decode thread
+        // first — on a manual skip it is still running, and starting a second
+        // one against the same engine mixed two tracks together.
         val live = engine
-        if (live != null && connection != null && device.deviceId == activeDeviceId &&
-            live.switchFormat(rate, bits) == 0
-        ) {
-            Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
-            val gen = ++session
-            running = true
-            thread = Thread {
-                var completed = false
-                try {
-                    analyzer.start()
-                    live.setVolume(volume)
-                    body(live)
-                    completed = true
-                } catch (t: Throwable) {
-                    Log.e("VCProbe", "decode failed: ${t.message}", t)
-                    if (running) onError?.invoke(t.message ?: t.toString())
-                } finally {
-                    if (!completed || !running) closeEngine()
-                    running = false
-                    if (gen == session) onFinished?.invoke()
-                }
-            }.also { it.isDaemon = true; it.start() }
-            return
+        if (live != null && connection != null && device.deviceId == activeDeviceId) {
+            keepEngineForReuse = true
+            val gen = ++session          // invalidate the old thread's callbacks
+            running = false
+            val old = thread
+            thread = null
+            if (old != null && old !== Thread.currentThread()) {
+                old.interrupt()
+                try { old.join(2000) } catch (_: InterruptedException) { }
+            }
+            keepEngineForReuse = false
+
+            if (live.switchFormat(rate, bits) == 0) {
+                Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
+                running = true
+                thread = Thread {
+                    var completed = false
+                    try {
+                        analyzer.start()
+                        live.setVolume(volume)
+                        body(live)
+                        completed = true
+                    } catch (t: Throwable) {
+                        Log.e("VCProbe", "decode failed: ${t.message}", t)
+                        if (running) onError?.invoke(t.message ?: t.toString())
+                    } finally {
+                        if (!keepEngineForReuse && (!completed || !running)) closeEngine()
+                        running = false
+                        if (gen == session) onFinished?.invoke()
+                    }
+                }.also { it.isDaemon = true; it.start() }
+                return
+            }
+            closeEngine()
         }
 
         closeEngine()
@@ -211,9 +224,7 @@ class UsbDirectPlayer(private val context: Context) {
                 Log.e("VCProbe", "engine failed: ${t.message}", t)
                 if (running) onError?.invoke(t.message ?: t.toString())
             } finally {
-                // A natural end keeps the engine for the next track; only a
-                // deliberate stop or a failure releases the device.
-                if (!completed || !running) {
+                if (!keepEngineForReuse && (!completed || !running)) {
                     eng?.close()
                     if (engine === eng) engine = null
                     conn?.close()
@@ -281,6 +292,7 @@ class UsbDirectPlayer(private val context: Context) {
     // ------------------------------------------------------------- decoding
 
     private fun decodeLoop(uri: Uri, target: PcmTarget, outRate: Int, startMs: Long) {
+        Log.i("VCProbe", "decode begin")
         val extractor = MediaExtractor()
         try {
             if (uri.scheme == "file") {
@@ -330,7 +342,7 @@ class UsbDirectPlayer(private val context: Context) {
         sink.flush()
         target.eos()
         extractor.release()
-        Log.i("VCProbe", "decode loop finished")
+        Log.i("VCProbe", "decode end")
     }
 
     private fun decodeRaw(extractor: MediaExtractor, sink: PcmSink, format: MediaFormat) {
