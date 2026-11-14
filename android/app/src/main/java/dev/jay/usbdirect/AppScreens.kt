@@ -413,7 +413,9 @@ fun SettingsScreen(
     trackCount: Int,
     onChooseFolder: () -> Unit,
     onRescan: () -> Unit,
-    onClearCache: () -> Unit
+    onClearCache: () -> Unit,
+    darkTheme: Boolean,
+    onDarkTheme: (Boolean) -> Unit
 ) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
@@ -434,6 +436,15 @@ fun SettingsScreen(
             Text("$trackCount tracks cached", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             OutlinedButton(onClick = onClearCache) { Text("Clear cache") }
+
+            Spacer(Modifier.height(24.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Dark theme", style = MaterialTheme.typography.bodyLarge)
+                    Text("Dark by default", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = darkTheme, onCheckedChange = onDarkTheme)
+            }
 
             Spacer(Modifier.height(24.dp))
             Text("About", style = MaterialTheme.typography.titleSmall)

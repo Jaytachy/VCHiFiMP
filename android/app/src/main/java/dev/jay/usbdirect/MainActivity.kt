@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private var artVersion by mutableStateOf(0)
     private var showNowPlaying by mutableStateOf(false)
     private var showQueue by mutableStateOf(false)
+    private var darkTheme by mutableStateOf(true)
     private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
@@ -112,6 +113,7 @@ class MainActivity : ComponentActivity() {
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
 
         volume = getPreferences(MODE_PRIVATE).getFloat("volume", 0.2f)
+        darkTheme = getPreferences(MODE_PRIVATE).getBoolean("dark", true)
         exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
@@ -132,6 +134,7 @@ class MainActivity : ComponentActivity() {
         }
         dacName = audioDevice()?.productName ?: ""
         if (intent?.getBooleanExtra("nowplaying", false) == true) showNowPlaying = true
+        if (intent?.getBooleanExtra("queue", false) == true) { showNowPlaying = true; showQueue = true }
         Log.i("VCProbe", "tab extra=" + (intent?.getStringExtra("tab") ?: "none"))
         when (intent?.getStringExtra("tab")) {
             "music" -> tab = Tab.MUSIC
@@ -140,7 +143,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MaterialTheme {
+            VcTheme(darkTheme) {
                 Surface(Modifier.fillMaxSize()) {
                     val picker = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocumentTree()
@@ -161,15 +164,6 @@ class MainActivity : ComponentActivity() {
                     if (album != null) BackHandler { openAlbum = null }
                     if (showQueue) BackHandler { showQueue = false }
                     if (showNowPlaying) BackHandler { showNowPlaying = false }
-                    if (showQueue) {
-                        QueueScreen(
-                            tracks = queueTracks,
-                            transportFlow = service?.state,
-                            onPick = { service?.playAt(it) },
-                            onClose = { showQueue = false }
-                        )
-                        return@Surface
-                    }
                     if (showNowPlaying) {
                         NowPlayingScreen(
                             transportFlow = service?.state,
@@ -193,7 +187,10 @@ class MainActivity : ComponentActivity() {
                                 getPreferences(MODE_PRIVATE).edit()
                                     .putFloat("volume", it).apply()
                             },
-                            onQueue = { showQueue = true }
+                            showQueue = showQueue,
+                            queueTracks = queueTracks,
+                            onToggleQueue = { showQueue = !showQueue },
+                            onPickQueue = { service?.playAt(it) }
                         )
                         return@Surface
                     }
@@ -283,6 +280,12 @@ class MainActivity : ComponentActivity() {
                                         tracks = emptyList()
                                         albums = emptyList()
                                         scanState = "cache cleared — rescan"
+                                    },
+                                    darkTheme = darkTheme,
+                                    onDarkTheme = {
+                                        darkTheme = it
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("dark", it).apply()
                                     }
                                 )
                             }

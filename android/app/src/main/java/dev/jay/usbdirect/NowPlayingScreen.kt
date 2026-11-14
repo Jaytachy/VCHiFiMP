@@ -1,6 +1,7 @@
 package dev.jay.usbdirect
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,21 +28,24 @@ import androidx.compose.ui.unit.dp
 import java.io.File
 
 /**
- * Full-screen player. Background is the album art itself, blurred and scrimmed,
- * so the palette follows the artwork instead of a fixed theme colour.
+ * Full-screen player. The queue opens *inside* this screen: the player shrinks
+ * upward and the sheet takes the lower half, so playback context is never lost.
  */
 @Composable
 fun NowPlayingScreen(
     transportFlow: kotlinx.coroutines.flow.StateFlow<TransportState>?,
     art: File?,
     volume: Float,
+    showQueue: Boolean,
+    queueTracks: List<Track>,
     onClose: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
-    onQueue: () -> Unit = {}
+    onToggleQueue: () -> Unit,
+    onPickQueue: (Int) -> Unit
 ) {
     val transport = rememberTransport(transportFlow)
     val bitmap = remember(art) {
@@ -52,22 +56,23 @@ fun NowPlayingScreen(
     var dragPos by remember { mutableStateOf(0f) }
     val dur = transport.durationMs.coerceAtLeast(1L)
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF07070A))) {
+    val artFraction by animateFloatAsState(if (showQueue) 0.40f else 0.86f, label = "art")
 
-        // ---- backdrop: the artwork, blurred and darkened ----
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+
         if (bitmap != null) {
             Image(
                 bitmap = bitmap, contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize().blur(48.dp).alpha(0.55f)
+                modifier = Modifier.fillMaxSize().blur(56.dp).alpha(0.5f)
             )
         }
         Box(
             Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0f to Color(0xCC000000),
-                    0.45f to Color(0x99000000),
-                    1f to Color(0xFF07070A)
+                    0f to MaterialTheme.colorScheme.background.copy(alpha = 0.86f),
+                    0.5f to MaterialTheme.colorScheme.background.copy(alpha = 0.72f),
+                    1f to MaterialTheme.colorScheme.background
                 )
             )
         )
@@ -75,9 +80,9 @@ fun NowPlayingScreen(
         Column(
             Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 22.dp)
         ) {
-            // ---- header ----
+            // header
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onClose) {
                     Text("⌄", style = MaterialTheme.typography.headlineMedium)
@@ -85,27 +90,34 @@ fun NowPlayingScreen(
                 Text(
                     "Now Playing",
                     style = MaterialTheme.typography.labelLarge,
-                    color = Color(0xCCFFFFFF),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onQueue) {
-                    Icon(Icons.Default.List, contentDescription = "Queue",
-                         tint = Color(0xCCFFFFFF))
+                IconButton(onClick = onToggleQueue) {
+                    Icon(
+                        Icons.Default.List, contentDescription = "Queue",
+                        tint = if (showQueue) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            Spacer(Modifier.weight(0.06f))
+            // player half
+            Column(
+                Modifier.weight(if (showQueue) 0.56f else 1f),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(Modifier.weight(0.04f))
 
-            // ---- artwork ----
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
-                        .fillMaxWidth(0.86f)
+                        .fillMaxWidth(artFraction)
                         .aspectRatio(1f)
-                        .shadow(24.dp, RoundedCornerShape(20.dp))
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(Color(0xFF17171C))
+                        .shadow(26.dp, RoundedCornerShape(22.dp))
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
                 ) {
                     if (bitmap != null) {
                         Image(
@@ -115,104 +127,115 @@ fun NowPlayingScreen(
                         )
                     }
                 }
-            }
 
-            Spacer(Modifier.weight(0.08f))
+                Spacer(Modifier.weight(0.06f))
 
-            // ---- titles ----
-            Text(
-                transport.title,
-                style = MaterialTheme.typography.headlineSmall,
-                color = Color.White,
-                maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                transport.artist.ifEmpty { "Unknown artist" },
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xB3FFFFFF),
-                maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(Modifier.height(18.dp))
-
-            // ---- seek ----
-            Slider(
-                value = (if (dragging) dragPos else transport.positionMs.toFloat())
-                    .coerceIn(0f, dur.toFloat()),
-                valueRange = 0f..dur.toFloat(),
-                onValueChange = { dragging = true; dragPos = it },
-                onValueChangeFinished = { dragging = false; onSeek(dragPos.toLong()) }
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    fmtTime(if (dragging) dragPos.toLong() else transport.positionMs),
-                    style = MaterialTheme.typography.labelMedium, color = Color(0x99FFFFFF)
-                )
-                Text(
-                    "-" + fmtTime((dur - (if (dragging) dragPos.toLong()
-                                        else transport.positionMs)).coerceAtLeast(0)),
-                    style = MaterialTheme.typography.labelMedium, color = Color(0x99FFFFFF)
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            // ---- quality line ----
-            if (transport.format.isNotEmpty()) {
-                Text(
-                    transport.format,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color(0x99FFFFFF),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            Spacer(Modifier.weight(0.10f))
-
-            // ---- transport ----
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                TextButton(onClick = onPrev) {
-                    Text("|◀", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        transport.title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        transport.artist.ifEmpty { "Unknown artist" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
                 }
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(76.dp).clickable { onPlayPause() }
+
+                Spacer(Modifier.height(14.dp))
+
+                Slider(
+                    value = (if (dragging) dragPos else transport.positionMs.toFloat())
+                        .coerceIn(0f, dur.toFloat()),
+                    valueRange = 0f..dur.toFloat(),
+                    onValueChange = { dragging = true; dragPos = it },
+                    onValueChangeFinished = { dragging = false; onSeek(dragPos.toLong()) }
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        fmtTime(if (dragging) dragPos.toLong() else transport.positionMs),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "-" + fmtTime(
+                            (dur - if (dragging) dragPos.toLong() else transport.positionMs)
+                                .coerceAtLeast(0)
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+                if (transport.format.isNotEmpty()) {
+                    Text(
+                        transport.format,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Spacer(Modifier.weight(0.10f))
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            if (transport.playing) "❚❚" else "▶",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
+                    TextButton(onClick = onPrev) {
+                        Text("|◀", style = MaterialTheme.typography.headlineSmall)
+                    }
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(74.dp).clickable { onPlayPause() }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                if (transport.playing) "❚❚" else "▶",
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
+                    TextButton(onClick = onNext) {
+                        Text("▶|", style = MaterialTheme.typography.headlineSmall)
                     }
                 }
-                TextButton(onClick = onNext) {
-                    Text("▶|", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+
+                if (!showQueue) Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "vol", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = volume,
+                        onValueChange = onVolume,
+                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+                    )
+                    Text(
+                        "${(volume * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
+                Spacer(Modifier.height(8.dp))
             }
 
-            Spacer(Modifier.height(16.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("vol", style = MaterialTheme.typography.labelSmall, color = Color(0x99FFFFFF))
-                Slider(
-                    value = volume,
-                    onValueChange = onVolume,
-                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
-                )
-                Text(
-                    "${(volume * 100).toInt()}%",
-                    style = MaterialTheme.typography.labelSmall, color = Color(0x99FFFFFF)
+            if (showQueue) {
+                QueueSheet(
+                    tracks = queueTracks,
+                    current = transport.index,
+                    onPick = onPickQueue,
+                    modifier = Modifier.weight(0.44f)
                 )
             }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }
