@@ -16,7 +16,8 @@ data class LibTrack(
     val durationMs: Long,
     val sampleRate: Int,
     val bitDepth: Int = 0,
-    val codec: String = ""
+    val codec: String = "",
+    val modifiedMs: Long = 0L
 ) {
     fun toQueueTrack() = Track(uri, title, durationMs, artist, album, codec)
 }
@@ -72,7 +73,8 @@ object LibraryScanner {
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_MIME_TYPE
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED
         )
         resolver.query(childrenUri, projection, null, null, null)?.use { c ->
             while (c.moveToNext()) {
@@ -80,13 +82,14 @@ object LibraryScanner {
                 val id = c.getString(0)
                 val name = c.getString(1) ?: continue
                 val mime = c.getString(2) ?: ""
+                val modified = runCatching { c.getLong(3) }.getOrDefault(0L)
                 val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                     walk(context, tree, id, out, onProgress, cancel)
                 } else {
                     val ext = name.substringAfterLast('.', "").lowercase()
                     if (ext in AUDIO_EXT || mime.startsWith("audio/")) {
-                        val t = tagOf(context, child, name)
+                        val t = tagOf(context, child, name, modified)
                         if (t != null) {
                             out.add(t)
                             onProgress(out.size, name)
@@ -99,7 +102,7 @@ object LibraryScanner {
         }
     }
 
-    private fun tagOf(context: Context, uri: Uri, filename: String): LibTrack? {
+    private fun tagOf(context: Context, uri: Uri, filename: String, modified: Long): LibTrack? {
         val r = MediaMetadataRetriever()
         return try {
             r.setDataSource(context, uri)
@@ -120,7 +123,8 @@ object LibraryScanner {
                 // playback probe the real value
             }
             val ext = filename.substringAfterLast('.', "").lowercase()
-            LibTrack(uri, title, artist, album, trackNo, durMs, rate, bits, codecName(ext))
+            LibTrack(uri, title, artist, album, trackNo, durMs, rate, bits,
+                     codecName(ext), modified)
         } catch (t: Throwable) {
             Log.w("VCProbe", "tag failed for $uri: ${t.message}")
             null

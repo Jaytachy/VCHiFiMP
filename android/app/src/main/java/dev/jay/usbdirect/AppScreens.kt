@@ -261,12 +261,16 @@ fun MusicScreen(
             SortBy.ARTIST -> tracks.sortedWith(compareBy({ it.artist.lowercase() }, { it.album.lowercase() }, { it.trackNo }))
             SortBy.ALBUM -> tracks.sortedWith(compareBy({ it.album.lowercase() }, { it.trackNo }))
             SortBy.DURATION -> tracks.sortedByDescending { it.durationMs }
+            SortBy.MODIFIED -> tracks.sortedByDescending { it.modifiedMs }
         }
     }
     val sortedAlbums = remember(albums, sort) {
         when (sort) {
             SortBy.ARTIST -> albums.sortedBy { it.artist.lowercase() }
             SortBy.DURATION -> albums.sortedByDescending { it.durationMs }
+            SortBy.MODIFIED -> albums.sortedByDescending { a ->
+                a.tracks.maxOfOrNull { it.modifiedMs } ?: 0L
+            }
             else -> albums.sortedBy { it.name.lowercase() }
         }
     }
@@ -277,6 +281,9 @@ fun MusicScreen(
     val sortedArtists = remember(artists, sort) {
         when (sort) {
             SortBy.DURATION -> artists.sortedByDescending { it.second.size }
+            SortBy.MODIFIED -> artists.sortedByDescending { a ->
+                a.second.maxOfOrNull { it.modifiedMs } ?: 0L
+            }
             else -> artists.sortedBy { it.first.lowercase() }
         }
     }
@@ -287,6 +294,7 @@ fun MusicScreen(
         ArtistDetail(
             name = af,
             tracks = sortedTracks.filter { it.artist.ifEmpty { "Unknown artist" } == af },
+            artVersion = artVersion,
             onBack = { artistFilter = null },
             onPlayList = onPlayList
         )
@@ -333,7 +341,7 @@ fun MusicScreen(
                     }
                 }
                 Spacer(Modifier.weight(1f))
-                if (section == LibSection.ALBUMS) {
+                if (section == LibSection.SONGS || section == LibSection.ALBUMS) {
                     TextButton(onClick = { grid = !grid }) {
                         Text(if (grid) "List view" else "Grid view")
                     }
@@ -342,7 +350,11 @@ fun MusicScreen(
         }
 
         when (section) {
-            LibSection.SONGS -> SongList(sortedTracks, onPlayList)
+            LibSection.SONGS -> if (grid) {
+                SongGrid(sortedTracks, artVersion, onPlayList)
+            } else {
+                SongList(sortedTracks, artVersion, onPlayList)
+            }
             LibSection.ALBUMS -> if (grid) {
                 AlbumGrid(sortedAlbums, artVersion, albums.size, onOpenAlbum)
             } else {
@@ -356,11 +368,15 @@ fun MusicScreen(
 private enum class LibSection(val label: String) { SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists") }
 
 private enum class SortBy(val label: String) {
-    TITLE("Title"), ARTIST("Artist"), ALBUM("Album"), DURATION("Duration")
+    TITLE("Title"), ARTIST("Artist"), ALBUM("Album"), DURATION("Duration"), MODIFIED("Modified")
 }
 
 @Composable
-private fun SongList(tracks: List<LibTrack>, onPlayList: (List<LibTrack>, Int) -> Unit) {
+private fun SongList(
+    tracks: List<LibTrack>,
+    artVersion: Int,
+    onPlayList: (List<LibTrack>, Int) -> Unit
+) {
     if (tracks.isEmpty()) {
         Text("No tracks. Choose a folder.", Modifier.padding(20.dp),
              style = MaterialTheme.typography.bodyMedium,
@@ -369,21 +385,109 @@ private fun SongList(tracks: List<LibTrack>, onPlayList: (List<LibTrack>, Int) -
     }
     LazyColumn(Modifier.fillMaxSize()) {
         itemsIndexed(tracks) { i, t ->
-            ListItem(
-                headlineContent = { Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                supportingContent = {
+            Row(
+                Modifier.fillMaxWidth().clickable { onPlayList(tracks, i) }
+                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TrackThumb(t, artVersion, 48)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                         style = MaterialTheme.typography.bodyLarge)
                     Text(
                         listOfNotNull(
                             t.artist.ifEmpty { null },
                             fmtTime(t.durationMs),
                             if (t.bitDepth > 0) "${t.bitDepth}-bit" else null
                         ).joinToString("  ·  "),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                },
-                modifier = Modifier.clickable { onPlayList(tracks, i) }
-            )
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun SongGrid(
+    tracks: List<LibTrack>,
+    artVersion: Int,
+    onPlayList: (List<LibTrack>, Int) -> Unit
+) {
+    if (tracks.isEmpty()) {
+        Text("No tracks. Choose a folder.", Modifier.padding(20.dp),
+             style = MaterialTheme.typography.bodyMedium,
+             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        items(tracks.size) { i ->
+            val t = tracks[i]
+            Column(Modifier.clickable { onPlayList(tracks, i) }) {
+                TrackArt(t, artVersion)
+                Spacer(Modifier.height(6.dp))
+                Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                     style = MaterialTheme.typography.bodyMedium)
+                Text(t.artist.ifEmpty { "Unknown artist" }, maxLines = 1,
+                     overflow = TextOverflow.Ellipsis,
+                     style = MaterialTheme.typography.bodySmall,
+                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrackThumb(t: LibTrack, artVersion: Int, size: Int) {
+    val ctx = LocalContext.current
+    val key = t.album + "\u0000" + t.artist
+    var bitmap by remember(key, artVersion) {
+        mutableStateOf(ArtCache.peek(t.album, t.artist))
+    }
+    LaunchedEffect(key, artVersion) {
+        if (bitmap == null) bitmap = ArtCache.load(ctx, t.album, t.artist)
+    }
+    Box(
+        Modifier.size(size.dp).clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        val b = bitmap
+        if (b != null) Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Text(t.title.take(1).uppercase(), style = MaterialTheme.typography.labelMedium,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun TrackArt(t: LibTrack, artVersion: Int) {
+    val ctx = LocalContext.current
+    val key = t.album + "\u0000" + t.artist
+    var bitmap by remember(key, artVersion) {
+        mutableStateOf(ArtCache.peek(t.album, t.artist))
+    }
+    LaunchedEffect(key, artVersion) {
+        if (bitmap == null) bitmap = ArtCache.load(ctx, t.album, t.artist)
+    }
+    Box(
+        Modifier.fillMaxWidth().aspectRatio(1f)
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        val b = bitmap
+        if (b != null) Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Text(t.title.take(1).uppercase(), style = MaterialTheme.typography.displaySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -479,6 +583,7 @@ private fun ArtistList(
 private fun ArtistDetail(
     name: String,
     tracks: List<LibTrack>,
+    artVersion: Int,
     onBack: () -> Unit,
     onPlayList: (List<LibTrack>, Int) -> Unit
 ) {
@@ -492,7 +597,7 @@ private fun ArtistDetail(
                 Text(plural(tracks.size, "track"), style = MaterialTheme.typography.bodySmall)
             }
         }
-        SongList(tracks, onPlayList)
+        SongList(tracks, artVersion, onPlayList)
     }
 }
 
