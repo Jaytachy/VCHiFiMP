@@ -6,8 +6,10 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "usb_audio_engine.h"
+#include "uae_dsp.h"
 
 static void throw_illegal(JNIEnv *env, const char *msg)
 {
@@ -132,6 +134,52 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetPpm(JNIEnv *env, jobject thiz,
                                                    jlong h, jfloat ppm)
 {
     uae_set_ppm((struct uae *)(intptr_t)h, ppm);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeDspEnable(JNIEnv *env, jobject thiz,
+                                                      jlong h, jboolean on)
+{
+    if (!h) return;
+    uae_set_dsp_enabled((struct uae *)(intptr_t)h, on ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeDspSetBands(JNIEnv *env, jobject thiz,
+                                                        jlong h, jdoubleArray params,
+                                                        jint nbands, jdouble preamp_db,
+                                                        jboolean auto_headroom)
+{
+    if (!h || !params) return;
+    int n = nbands;
+    if (n < 0) n = 0;
+    if (n > UAE_DSP_MAX_BANDS) n = UAE_DSP_MAX_BANDS;
+    if ((*env)->GetArrayLength(env, params) < n * 5) return;
+
+    double raw[UAE_DSP_MAX_BANDS * 5];
+    (*env)->GetDoubleArrayRegion(env, params, 0, n * 5, raw);
+    if ((*env)->ExceptionCheck(env)) return;
+
+    struct uae_dsp_band bands[UAE_DSP_MAX_BANDS];
+    memset(bands, 0, sizeof(bands));
+    for (int i = 0; i < n; i++) {
+        const double *p = &raw[i * 5];
+        bands[i].type = (int)p[0];
+        bands[i].fc = p[1];
+        bands[i].q = p[2];
+        bands[i].gain_db = p[3];
+        bands[i].enabled = p[4] != 0.0;
+    }
+    uae_set_dsp_bands((struct uae *)(intptr_t)h, bands, n,
+                      (double)preamp_db, auto_headroom ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeDspReset(JNIEnv *env, jobject thiz,
+                                                     jlong h)
+{
+    if (!h) return;
+    uae_reset_dsp((struct uae *)(intptr_t)h);
 }
 
 JNIEXPORT void JNICALL

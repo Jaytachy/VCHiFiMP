@@ -14,9 +14,12 @@ set_target_properties(samplerate PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON
 
 add_library(usbdirect SHARED
         usb_audio_engine.c
+        uae_dsp.c
         jni_bridge.c
         resampler.c
         resampler_bridge.c)
+
+set_target_properties(usbdirect PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 
 target_include_directories(usbdirect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

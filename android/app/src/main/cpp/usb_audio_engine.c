@@ -25,6 +25,7 @@
 #include <linux/usb/ch9.h>
 
 #include "usb_audio_engine.h"
+#include "uae_dsp.h"
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -121,6 +122,9 @@ struct uae {
     int started;
     pthread_t thread;
     char errmsg[160];
+
+    /* 12-slot biquad rack; calloc-free init happens in uae_open. */
+    struct uae_dsp dsp;
 };
 
 static uint64_t clock_gettime_ns(void)
@@ -402,6 +406,14 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
     float tmp[MAX_FRAMES * 2];
     int off = 0;
 
+    /* One coefficient snapshot per URB. While disabled this is a single
+     * atomic load; no DSP code runs on the sample path. */
+    struct uae_dsp_snapshot dsp_snap;
+    int dsp_on = e->channels == 2 &&
+        atomic_load_explicit(&e->dsp.enabled, memory_order_relaxed) != 0;
+    if (dsp_on && !uae_dsp_read_snapshot(&e->dsp, &dsp_snap))
+        dsp_on = 0;
+
     for (int k = 0; k < PKTS_PER_URB; k++) {
         *acc += fpm;
         int cur = (int)floor(*acc);
@@ -446,6 +458,8 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
             if (e->eos) e->ending = 1;
         }
 
+        if (dsp_on)
+            uae_dsp_process(&e->dsp, &dsp_snap, tmp, n);
         pack_frames(e, c->buf + off, tmp, n);
         c->pkt[k].length = (unsigned int)(n * e->bpf);
         off += n * e->bpf;
@@ -567,6 +581,8 @@ struct uae *uae_open(int fd, int rate, int bits)
     pthread_mutex_init(&e->lock, NULL);
     pthread_cond_init(&e->can_read, NULL);
     pthread_cond_init(&e->can_write, NULL);
+    /* Initialize early so uae_close() on a partially-open engine is valid. */
+    uae_dsp_init(&e->dsp, 0.0);
 
     unsigned char cfg[1024];
     int r = ctrl(fd, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
@@ -741,6 +757,8 @@ struct uae *uae_open(int fd, int rate, int bits)
     e->ring = malloc(sizeof(float) * RING_FRAMES * (size_t)e->channels);
     if (!e->ring) { set_err(e, "ring alloc failed"); return e; }
 
+    uae_dsp_prepare_rate(&e->dsp, (double)e->rate);
+
     e->running = 1;
     if (pthread_create(&e->thread, NULL, pump, e) != 0) {
         set_err(e, "pthread_create failed");
@@ -841,6 +859,11 @@ int uae_switch_format(struct uae *e, int rate, int bits)
     e->ending = 0;
     e->eos = 0;
     e->failed = 0;
+
+    /* Clear DF-II history and recompile RBJ coefficients for the new rate.
+     * This covers seeks and non-gapless track changes too, because both go
+     * through this path. Gapless boundaries deliberately skip it. */
+    uae_dsp_prepare_rate(&e->dsp, (double)rate);
 
     struct usbdevfs_setinterface si;
     si.interface = (unsigned)pick->iface;
@@ -944,6 +967,24 @@ void uae_set_ppm(struct uae *e, float ppm)
     if (e) e->ppm = ppm;
 }
 
+/* ------------------------------------------------------------ DSP control */
+
+void uae_set_dsp_enabled(struct uae *e, int on)
+{
+    if (e) uae_dsp_set_enabled(&e->dsp, on);
+}
+
+void uae_set_dsp_bands(struct uae *e, const struct uae_dsp_band *bands,
+                       int nbands, double preamp_db, int auto_headroom)
+{
+    if (e) uae_dsp_set_bands(&e->dsp, bands, nbands, preamp_db, auto_headroom);
+}
+
+void uae_reset_dsp(struct uae *e)
+{
+    if (e) uae_dsp_request_reset(&e->dsp);
+}
+
 void uae_close(struct uae *e)
 {
     if (!e) return;
@@ -986,6 +1027,7 @@ void uae_close(struct uae *e)
     LOGI("uae: handed back, rebind requested for %d/%d interfaces",
          reconnected, e->nifaces);
 
+    uae_dsp_destroy(&e->dsp);
     free(e->ring);
     pthread_mutex_destroy(&e->lock);
     pthread_cond_destroy(&e->can_read);

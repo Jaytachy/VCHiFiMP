@@ -2,6 +2,22 @@ package dev.jay.usbdirect
 
 import java.nio.FloatBuffer
 
+/** One RBJ biquad slot in the native rack. type: 0=peak,1=lowshelf,2=highshelf,3=HPF,4=LPF. */
+data class DspBand(
+    val type: Int,
+    val fc: Double,
+    val q: Double,
+    val gainDb: Double = 0.0,
+    val enabled: Boolean = true
+)
+
+/** Complete DSP rack configuration; held across engine restarts. */
+data class DspConfig(
+    val bands: List<DspBand> = emptyList(),
+    val preampDb: Double = 0.0,
+    val autoHeadroom: Boolean = true
+)
+
 /**
  * Thin Kotlin wrapper over the native raw-usbfs engine.
  *
@@ -30,6 +46,34 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
 
     fun setDither(on: Boolean) {
         if (handle != 0L) nativeSetDither(handle, on)
+    }
+
+    /** Enable/disable the native biquad rack (ramped wet/dry in C). */
+    fun setDspEnabled(on: Boolean) {
+        if (handle != 0L) nativeDspEnable(handle, on)
+    }
+
+    /** Publish band parameters. Coefficients are compiled natively per rate. */
+    fun setDspConfig(config: DspConfig) {
+        if (handle == 0L) return
+        val bands = config.bands.take(12)
+        val params = DoubleArray(bands.size * 5)
+        for (i in bands.indices) {
+            val b = bands[i]
+            val o = i * 5
+            params[o] = b.type.toDouble()
+            params[o + 1] = b.fc
+            params[o + 2] = b.q
+            params[o + 3] = b.gainDb
+            params[o + 4] = if (b.enabled) 1.0 else 0.0
+        }
+        nativeDspSetBands(handle, params, bands.size, config.preampDb,
+                          config.autoHeadroom)
+    }
+
+    /** Clear DF-II history; coefficients are kept. */
+    fun resetDsp() {
+        if (handle != 0L) nativeDspReset(handle)
     }
 
     /** Fixed-order snapshot: urbs, errors, underruns, ring%, rate, bits, alt,
@@ -76,6 +120,12 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetVolume(h: Long, v: Float)
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeSetDither(h: Long, on: Boolean)
+    private external fun nativeDspEnable(h: Long, on: Boolean)
+    private external fun nativeDspSetBands(
+        h: Long, params: DoubleArray, nbands: Int,
+        preampDb: Double, autoHeadroom: Boolean
+    )
+    private external fun nativeDspReset(h: Long)
     private external fun nativeEos(h: Long)
     private external fun nativeFramesPlayed(h: Long): Long
     private external fun nativeBufferedFrames(h: Long): Long

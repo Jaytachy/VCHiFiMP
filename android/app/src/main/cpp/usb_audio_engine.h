@@ -29,4 +29,11 @@ int  uae_hw_volume_info(struct uae *e, int out[4]);   /* min,max,res,cur in 1/25
 int  uae_hw_volume_set(struct uae *e, int raw);
 void uae_close(struct uae *e);
 
+/* DSP rack control (thin wrappers over struct uae_dsp). */
+struct uae_dsp_band;
+void uae_set_dsp_enabled(struct uae *e, int on);
+void uae_set_dsp_bands(struct uae *e, const struct uae_dsp_band *bands,
+                       int nbands, double preamp_db, int auto_headroom);
+void uae_reset_dsp(struct uae *e);
+
 #endif

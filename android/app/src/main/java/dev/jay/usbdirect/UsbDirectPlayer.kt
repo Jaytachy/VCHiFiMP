@@ -56,6 +56,9 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile private var autoBitDepth = true
     @Volatile var fixedBits = 24
     @Volatile private var currentOutBits = 24
+    /** DSP rack state survives engine restarts and track changes. */
+    @Volatile private var dspConfig = DspConfig()
+    @Volatile private var dspEnabled = false
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -213,6 +216,10 @@ class UsbDirectPlayer(private val context: Context) {
 
             if (live.switchFormat(rate, bits) == 0) {
                 Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
+                // switch_format recompiles coefficients for the new rate; push
+                // the Kotlin-side config again so the two never drift.
+                live.setDspConfig(dspConfig)
+                live.setDspEnabled(dspEnabled)
                 running = true
                 thread = Thread {
                     var completed = false
@@ -259,6 +266,8 @@ class UsbDirectPlayer(private val context: Context) {
                 engine = eng
                 eng.setVolume(volume)
                 eng.setDither(dither)
+                eng.setDspConfig(dspConfig)
+                eng.setDspEnabled(dspEnabled)
 
                 analyzer.start()
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
@@ -324,6 +333,21 @@ class UsbDirectPlayer(private val context: Context) {
     fun setDither(on: Boolean) {
         dither = on
         engine?.setDither(on)
+    }
+
+    /** Store the rack config even when no engine is open. */
+    fun setDspConfig(config: DspConfig) {
+        dspConfig = config
+        engine?.setDspConfig(config)
+    }
+
+    fun setDspEnabled(on: Boolean) {
+        dspEnabled = on
+        engine?.setDspEnabled(on)
+    }
+
+    fun resetDsp() {
+        engine?.resetDsp()
     }
 
     fun setVolume(v: Float) {
