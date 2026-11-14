@@ -64,11 +64,54 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetVolume(JNIEnv *env, jobject thiz,
     uae_set_volume((struct uae *)(intptr_t)h, v);
 }
 
+JNIEXPORT jlongArray JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeTelemetry(JNIEnv *env, jobject thiz, jlong h)
+{
+    long long buf[24];
+    int n = uae_get_telemetry((struct uae *)(intptr_t)h, buf, 24);
+    jlong tmp[24];
+    for (int i = 0; i < n; i++) tmp[i] = (jlong)buf[i];
+    jlongArray arr = (*env)->NewLongArray(env, n);
+    if (arr && n > 0) (*env)->SetLongArrayRegion(env, arr, 0, n, tmp);
+    return arr;
+}
+
+JNIEXPORT jstring JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeSummary(JNIEnv *env, jobject thiz, jlong h)
+{
+    const char *s = uae_summary((struct uae *)(intptr_t)h);
+    return (*env)->NewStringUTF(env, s ? s : "");
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeHwVolInfo(JNIEnv *env, jobject thiz,
+                                                      jlong h, jintArray out)
+{
+    int info[4];
+    if (!uae_hw_volume_info((struct uae *)(intptr_t)h, info)) return 0;
+    if (out) (*env)->SetIntArrayRegion(env, out, 0, 4, (const jint *)info);
+    return 1;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeHwVolSet(JNIEnv *env, jobject thiz,
+                                                     jlong h, jint raw)
+{
+    return uae_hw_volume_set((struct uae *)(intptr_t)h, (int)raw) == 0
+           ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jint JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeSwitchFormat(JNIEnv *env, jobject thiz,
                                                          jlong h, jint rate, jint bits)
 {
     return (jint)uae_switch_format((struct uae *)(intptr_t)h, (int)rate, (int)bits);
+}
+
+JNIEXPORT jlong JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeBufferedFrames(JNIEnv *env, jobject thiz, jlong h)
+{
+    return (jlong)uae_buffered_frames((struct uae *)(intptr_t)h);
 }
 
 JNIEXPORT jlong JNICALL

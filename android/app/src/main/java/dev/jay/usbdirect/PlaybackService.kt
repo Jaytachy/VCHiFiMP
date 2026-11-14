@@ -92,6 +92,7 @@ class PlaybackService : Service() {
     private var volume = 0.2f
     private var bits = 24
     private var exclusive = true
+    private var hardwareVolume = false
     @Volatile private var suppressFinish = false
 
     inner class LocalBinder : Binder() {
@@ -381,8 +382,36 @@ class PlaybackService : Service() {
 
     fun setVolume(v: Float) {
         volume = v.coerceIn(0f, 1f)
+        if (hardwareVolume) {
+            val info = player.hwVolumeInfo()
+            if (info != null) {
+                val raw = info[0] + ((info[1] - info[0]) * volume).toInt()
+                if (player.setHwVolume(raw)) {
+                    player.setVolume(1f)      // digital unity: stay bit-perfect
+                    return
+                }
+            }
+        }
         player.setVolume(volume)
     }
+
+    /** Route the slider through the DAC's Feature Unit instead of float gain. */
+    fun setHardwareVolume(on: Boolean) {
+        hardwareVolume = on
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("hwvol", on).apply()
+        if (on) {
+            val info = player.hwVolumeInfo()
+            if (info != null) {
+                val raw = info[0] + ((info[1] - info[0]) * volume).toInt()
+                if (player.setHwVolume(raw)) player.setVolume(1f)
+            }
+        } else {
+            player.setVolume(volume)
+        }
+    }
+
+    fun hardwareVolumeEnabled(): Boolean = hardwareVolume
+    fun hardwareVolumeSupported(): Boolean = player.hwVolumeInfo() != null
 
     // ---------------------------------------------------------- notification
 

@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private var dacName by mutableStateOf("")
     private var volume by mutableStateOf(0.2f)
     private var exclusive by mutableStateOf(true)
+    private var hardwareVolume by mutableStateOf(false)
     private var tab by mutableStateOf(Tab.HOME)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var folderLabel by mutableStateOf("")
@@ -68,6 +69,7 @@ class MainActivity : ComponentActivity() {
             service = svc
             svc.setVolume(volume)
             svc.setExclusive(exclusive)
+            svc.setHardwareVolume(hardwareVolume)
             // needed so Home's "continue listening" can start on a cold launch
             audioDevice()?.let { d -> if (usbManager.hasPermission(d)) svc.setDevice(d, 24, volume) }
             lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
@@ -163,6 +165,7 @@ class MainActivity : ComponentActivity() {
         volume = getPreferences(MODE_PRIVATE).getFloat("volume", 0.2f)
         darkTheme = getPreferences(MODE_PRIVATE).getBoolean("dark", true)
         exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
+        hardwareVolume = getPreferences(MODE_PRIVATE).getBoolean("hwvol", false)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
@@ -317,6 +320,14 @@ class MainActivity : ComponentActivity() {
                                         service?.setVolume(it)
                                         getPreferences(MODE_PRIVATE).edit()
                                             .putFloat("volume", it).apply()
+                                    },
+                                    player = service?.player,
+                                    hardwareVolume = hardwareVolume,
+                                    onHardwareVolume = {
+                                        hardwareVolume = it
+                                        service?.setHardwareVolume(it)
+                                        getPreferences(MODE_PRIVATE).edit()
+                                            .putBoolean("hwvol", it).apply()
                                     }
                                 )
                                 Tab.SETTINGS -> SettingsScreen(

@@ -28,12 +28,32 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetPpm(handle, ppm)
     }
 
+    /** Fixed-order snapshot: urbs, errors, underruns, ring%, rate, bits, alt,
+     *  maxpkt, sync, latencyMs, jitter min/avg/max us, framesDone/Packed, filled. */
+    fun telemetry(): LongArray = if (handle != 0L) nativeTelemetry(handle) ?: LongArray(0)
+                                 else LongArray(0)
+
+    fun summary(): String = if (handle != 0L) nativeSummary(handle) ?: "" else ""
+
+    /** int[]{min,max,res,cur} in 1/256 dB, or null when the DAC has no Feature Unit volume. */
+    fun hwVolumeInfo(): IntArray? {
+        if (handle == 0L) return null
+        val out = IntArray(4)
+        return if (nativeHwVolInfo(handle, out) == 1) out else null
+    }
+
+    fun setHwVolume(raw: Int): Boolean =
+        handle != 0L && nativeHwVolSet(handle, raw)
+
     /** Re-target the live session (rate + bit depth) without releasing it. */
     fun switchFormat(rate: Int, bits: Int): Int =
         if (handle != 0L) nativeSwitchFormat(handle, rate, bits) else -1
 
     /** Frames the device has actually consumed (completed URBs), not queued. */
     fun framesPlayed(): Long = if (handle != 0L) nativeFramesPlayed(handle) else 0L
+
+    /** Frames decoded but not yet heard: ring occupancy + URBs in flight. */
+    fun bufferedFrames(): Long = if (handle != 0L) nativeBufferedFrames(handle) else 0L
 
     /** Tell the engine the producer is done, so it can fade out cleanly. */
     fun eos() {
@@ -53,7 +73,12 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeEos(h: Long)
     private external fun nativeFramesPlayed(h: Long): Long
+    private external fun nativeBufferedFrames(h: Long): Long
     private external fun nativeSwitchFormat(h: Long, rate: Int, bits: Int): Int
+    private external fun nativeTelemetry(h: Long): LongArray?
+    private external fun nativeSummary(h: Long): String?
+    private external fun nativeHwVolInfo(h: Long, out: IntArray): Int
+    private external fun nativeHwVolSet(h: Long, raw: Int): Boolean
     private external fun nativeClose(h: Long)
 
     companion object {

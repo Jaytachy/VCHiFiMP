@@ -48,6 +48,12 @@ class UsbDirectPlayer(private val context: Context) {
     private var connection: UsbDeviceConnection? = null
     private var engine: UsbAudioEngine? = null
 
+    /** Diagnostics: null when no engine is open (paused or idle). */
+    fun telemetry(): LongArray = engine?.telemetry() ?: LongArray(0)
+    fun summary(): String = engine?.summary() ?: ""
+    fun hwVolumeInfo(): IntArray? = engine?.hwVolumeInfo()
+    fun setHwVolume(raw: Int): Boolean = engine?.setHwVolume(raw) ?: false
+
     /** Analyser taps the post-volume float stream, before dither/packing. */
     val analyzer = AudioAnalyzer()
 
@@ -331,8 +337,13 @@ class UsbDirectPlayer(private val context: Context) {
             extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
             Log.i("VCProbe", "seek to " + startMs + " ms (sampleTime=" + extractor.sampleTime + ")")
         }
+        analyzer.setSampleRate(outRate)
         val sink = PcmSink(target, srcRate, outRate, srcCh, startMs, onProgress,
-            tap = { b, n -> analyzer.offer(b, n, mixerVolume) })
+            tap = { b, n ->
+                // keep the visualiser aligned with what is actually audible
+                analyzer.delayFrames = target.bufferedFrames()
+                analyzer.offer(b, n, mixerVolume)
+            })
 
         if (mime == MediaFormat.MIMETYPE_AUDIO_RAW) {
             decodeRaw(extractor, sink, format)
@@ -432,6 +443,8 @@ class UsbDirectPlayer(private val context: Context) {
         fun eos()
         /** Frames actually consumed by the sink, not frames handed to it. */
         fun playedFrames(): Long
+        /** Frames buffered between us and the listener. */
+        fun bufferedFrames(): Long
     }
 
     private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
@@ -439,6 +452,7 @@ class UsbDirectPlayer(private val context: Context) {
             eng.write(buf, frames)
         override fun eos() = eng.eos()
         override fun playedFrames(): Long = eng.framesPlayed()
+        override fun bufferedFrames(): Long = eng.bufferedFrames()
     }
 
     private class MixerTarget(
@@ -458,6 +472,7 @@ class UsbDirectPlayer(private val context: Context) {
         override fun eos() { /* nothing queued to flush */ }
         override fun playedFrames(): Long =
             track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+        override fun bufferedFrames(): Long = 0L
     }
 
     private class PcmSink(

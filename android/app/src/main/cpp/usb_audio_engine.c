@@ -99,12 +99,35 @@ struct uae {
     struct uae_alt alts[MAX_ALTS];
     int nalts;
 
+    /* UAC Feature Unit (hardware volume) */
+    int fu_id, ac_iface;
+    int hw_vol_supported;
+    int hw_vol_min, hw_vol_max, hw_vol_res, hw_vol_cur;
+
+    /* telemetry */
+    volatile unsigned long urbs_reaped;
+    volatile unsigned long urb_errors;
+    volatile unsigned long underruns;
+    volatile int primed;             /* buffer has filled at least once */
+    uint64_t frames_packed;
+    uint64_t last_reap_ns;
+    uint64_t interval_min_ns, interval_max_ns, interval_sum_ns;
+    unsigned long interval_count;
+    char summary[768];
+
     volatile int running;
     volatile int failed;
     int started;
     pthread_t thread;
     char errmsg[160];
 };
+
+static uint64_t clock_gettime_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static uint32_t rng_state = 0x2545f491u;
 static inline float frand(void)
@@ -214,6 +237,84 @@ static int sweep_audio(int fd, const unsigned char *cfg, int total)
     return n;
 }
 
+/* UAC1 AudioControl: find Feature Units and their master-channel volume bit.
+ * A device may expose several (one per terminal); take the first that offers
+ * volume rather than assuming the first one does. */
+static void parse_feature_unit(const unsigned char *cfg, int total, struct uae *e)
+{
+    int ac = -1;
+    for (int i = 0; i + 1 < total; ) {
+        int len = cfg[i], type = cfg[i + 1];
+        if (len < 2 || i + len > total) break;
+        if (type == USB_DT_INTERFACE && cfg[i + 5] == 0x01 && cfg[i + 6] == 0x01) {
+            ac = cfg[i + 2];
+            break;
+        }
+        i += len;
+    }
+    if (ac < 0) return;
+    e->ac_iface = ac;
+
+    int in_ac = 0;
+    for (int i = 0; i + 1 < total; ) {
+        int len = cfg[i], type = cfg[i + 1];
+        if (len < 2 || i + len > total) break;
+
+        if (type == USB_DT_INTERFACE) {
+            int cls = cfg[i + 5], sub = cfg[i + 6];
+            in_ac = (cls == 0x01 && sub == 0x01);
+        } else if (in_ac && type == USB_DT_CS_INTERFACE &&
+                   cfg[i + 2] == 0x06 && len >= 7) {
+            int unit = cfg[i + 3];
+            int src  = cfg[i + 4];
+            int csize = cfg[i + 5];
+            int master = cfg[i + 6];
+            if (csize > 1 && len >= 8) master |= cfg[i + 7] << 8;
+            LOGI("uae: feature unit %d (src %d) controls=0x%04x size=%d",
+                 unit, src, master, csize);
+            if (!e->hw_vol_supported && (master & 0x02)) {
+                e->fu_id = unit;
+                e->hw_vol_supported = 1;
+            }
+        }
+        i += len;
+    }
+}
+
+static int uac_vol_get(struct uae *e, uint8_t req, int *out)
+{
+    unsigned char b[2] = {0, 0};
+    int r = ctrl(e->fd, 0xA1, req, 0x0200, (uint16_t)((e->fu_id << 8) | e->ac_iface), 2, b);
+    if (r < 2) return -1;
+    *out = (int16_t)(b[0] | (b[1] << 8));
+    return 0;
+}
+
+static int uac_vol_set(struct uae *e, int raw)
+{
+    unsigned char b[2] = { (unsigned char)(raw & 0xff), (unsigned char)((raw >> 8) & 0xff) };
+    int r = ctrl(e->fd, 0x21, 0x01, 0x0200, (uint16_t)((e->fu_id << 8) | e->ac_iface), 2, b);
+    return r < 0 ? -1 : 0;
+}
+
+int uae_hw_volume_info(struct uae *e, int out[4])
+{
+    if (!e || !e->hw_vol_supported) return 0;
+    out[0] = e->hw_vol_min; out[1] = e->hw_vol_max;
+    out[2] = e->hw_vol_res; out[3] = e->hw_vol_cur;
+    return 1;
+}
+
+int uae_hw_volume_set(struct uae *e, int raw)
+{
+    if (!e || !e->hw_vol_supported) return -1;
+    if (raw < e->hw_vol_min) raw = e->hw_vol_min;
+    if (raw > e->hw_vol_max) raw = e->hw_vol_max;
+    if (uac_vol_set(e, raw) < 0) return -1;
+    e->hw_vol_cur = raw;
+    return 0;
+}
+
 static int alt_has_rate(const struct uae_alt *a, unsigned rate)
 {
     for (int k = 0; k < a->nrates; k++)
@@ -234,6 +335,7 @@ static size_t ring_write(struct uae *e, const float *src, size_t frames)
     }
     e->head = (e->head + n) % RING_FRAMES;
     e->filled += n;
+    if (!e->primed && e->filled > RING_FRAMES / 2) e->primed = 1;
     return n;
 }
 
@@ -330,7 +432,11 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
             pthread_mutex_unlock(&e->lock);
         }
 
+        e->frames_packed += (uint64_t)n;
         if (got < (size_t)n) {
+            /* Only count a real starvation: at startup the ring is empty by
+             * definition, and after EOS silence is expected. */
+            if (!e->eos && e->primed) e->underruns++;
             memset(tmp + got * e->channels, 0,
                    sizeof(float) * (size_t)(n - got) * e->channels);
             /* Only fade out once the producer has declared end-of-stream.
@@ -402,6 +508,19 @@ static void *pump(void *arg)
         // A completed URB means the host controller has handed those frames to
         // the device: this is the only honest "played" counter we have.
         e->frames_done += u->buffer_length / (unsigned)e->bpf;
+        e->urbs_reaped++;
+        if (u->status) e->urb_errors++;
+        {
+            uint64_t now = (uint64_t)clock_gettime_ns();
+            if (e->last_reap_ns) {
+                uint64_t dt = now - e->last_reap_ns;
+                if (e->interval_count == 0 || dt < e->interval_min_ns) e->interval_min_ns = dt;
+                if (dt > e->interval_max_ns) e->interval_max_ns = dt;
+                e->interval_sum_ns += dt;
+                e->interval_count++;
+            }
+            e->last_reap_ns = now;
+        }
         if ((++reaped % 500) == 0)
             LOGI("uae: reaped=%d status=%d len=%u", reaped, u->status, u->actual_length);
         if (u->status && reaped < 600)
@@ -583,6 +702,40 @@ struct uae *uae_open(int fd, int rate, int bits)
         LOGI("uae: GET_CUR sampling frequency unsupported (%d)", got);
     }
 
+    parse_feature_unit(cfg, total, e);
+    if (e->hw_vol_supported) {
+        int mn = 0, mx = 0, rs = 0, cur = 0;
+        if (uac_vol_get(e, 0x82, &mn) == 0 && uac_vol_get(e, 0x83, &mx) == 0) {
+            if (uac_vol_get(e, 0x84, &rs) != 0) rs = 0;
+            if (uac_vol_get(e, 0x81, &cur) != 0) cur = mx;
+            e->hw_vol_min = mn; e->hw_vol_max = mx;
+            e->hw_vol_res = rs; e->hw_vol_cur = cur;
+            LOGI("uae: feature unit %d volume: min=%d max=%d res=%d cur=%d (1/256 dB)",
+                 e->fu_id, mn, mx, rs, cur);
+        } else {
+            e->hw_vol_supported = 0;
+            LOGI("uae: feature unit %d exposes no volume range", e->fu_id);
+        }
+    }
+
+    /* descriptor summary for the Output screen */
+    {
+        int off = snprintf(e->summary, sizeof(e->summary), "UAC1\n");
+        for (int i = 0; i < e->nalts && off < (int)sizeof(e->summary) - 80; i++) {
+            struct uae_alt *a = &e->alts[i];
+            if (!a->ep) continue;
+            const char *syn[] = {"none", "async", "adaptive", "sync"};
+            off += snprintf(e->summary + off, sizeof(e->summary) - off,
+                "iface %d alt %d: %d ch, %d-bit, EP 0x%02x %s, maxpkt %d\n",
+                a->iface, a->altset, a->channels, a->bitres,
+                a->ep, syn[(a->epattr >> 2) & 3], a->maxpkt);
+        }
+        if (e->hw_vol_supported && off < (int)sizeof(e->summary) - 60)
+            snprintf(e->summary + off, sizeof(e->summary) - off,
+                     "feature unit %d: volume %d..%d (1/256 dB)\n",
+                     e->fu_id, e->hw_vol_min, e->hw_vol_max);
+    }
+
     e->ring = malloc(sizeof(float) * RING_FRAMES * (size_t)e->channels);
     if (!e->ring) { set_err(e, "ring alloc failed"); return e; }
 
@@ -671,6 +824,7 @@ int uae_switch_format(struct uae *e, int rate, int bits)
     pthread_mutex_lock(&e->lock);
     e->head = e->tail = 0;
     e->filled = 0;
+    e->primed = 0;
     pthread_cond_broadcast(&e->can_write);
     pthread_mutex_unlock(&e->lock);
 
@@ -710,6 +864,62 @@ int uae_switch_format(struct uae *e, int rate, int bits)
     }
     e->started = 1;
     return 0;
+}
+
+const char *uae_summary(struct uae *e)
+{
+    return e ? e->summary : "";
+}
+
+/* Fixed-order telemetry snapshot; indices are mirrored in Kotlin. */
+int uae_get_telemetry(struct uae *e, long long *out, int max)
+{
+    if (!e || max < 17) return 0;
+    size_t filled;
+    pthread_mutex_lock(&e->lock);
+    filled = e->filled;
+    pthread_mutex_unlock(&e->lock);
+
+    uint64_t latency_frames = filled;
+    if (e->frames_packed > e->frames_done)
+        latency_frames += e->frames_packed - e->frames_done;
+
+    out[0] = (long long)e->urbs_reaped;
+    out[1] = (long long)e->urb_errors;
+    out[2] = (long long)e->underruns;
+    out[3] = (long long)(filled * 100 / RING_FRAMES);
+    out[4] = e->rate;
+    out[5] = (e->bpf / (e->channels ? e->channels : 1)) * 8;
+    out[6] = e->alt;
+    out[7] = e->maxpkt;
+    out[8] = (e->alts[0].epattr >> 2) & 3;   /* overwritten below by chosen alt */
+    for (int i = 0; i < e->nalts; i++)
+        if (e->alts[i].altset == e->alt && e->alts[i].iface == e->iface)
+            out[8] = (e->alts[i].epattr >> 2) & 3;
+    out[9] = e->rate ? (long long)(latency_frames * 1000 / (uint64_t)e->rate) : 0;
+    out[10] = e->interval_count ? (long long)(e->interval_min_ns / 1000) : 0;
+    out[11] = e->interval_count ? (long long)(e->interval_max_ns / 1000) : 0;
+    out[12] = e->interval_count ? (long long)((e->interval_sum_ns / e->interval_count) / 1000) : 0;
+    out[13] = (long long)e->frames_done;
+    out[14] = (long long)e->frames_packed;
+    out[15] = (long long)filled;
+    out[16] = e->rate
+        ? (long long)((e->frames_packed - e->frames_done) * 1000 / (uint64_t)e->rate)
+        : 0;
+    return 17;
+}
+
+/* Frames decoded but not yet consumed: ring occupancy + URBs in flight. */
+uint64_t uae_buffered_frames(struct uae *e)
+{
+    if (!e) return 0;
+    uint64_t filled;
+    pthread_mutex_lock(&e->lock);
+    filled = e->filled;
+    pthread_mutex_unlock(&e->lock);
+    uint64_t flight = e->frames_packed > e->frames_done
+                    ? e->frames_packed - e->frames_done : 0;
+    return filled + flight;
 }
 
 uint64_t uae_frames_played(struct uae *e)

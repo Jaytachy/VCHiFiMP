@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import androidx.compose.ui.Alignment
@@ -834,6 +835,24 @@ private fun AlbumCard(album: LibAlbum, artVersion: Int, onClick: () -> Unit) {
 
 /* -------------------------------------------------------------- output */
 
+data class Telemetry(
+    val urbs: Long, val errors: Long, val underruns: Long, val ringPct: Long,
+    val rate: Long, val bits: Long, val alt: Long, val maxpkt: Long, val sync: Long,
+    val latencyMs: Long, val minUs: Long, val maxUs: Long, val avgUs: Long,
+    val done: Long, val packed: Long, val filled: Long, val inflightMs: Long
+) {
+    companion object {
+        fun from(a: LongArray) = Telemetry(
+            a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8],
+            a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16]
+        )
+    }
+}
+
+private fun syncName(s: Long) = when (s) {
+    1L -> "async"; 2L -> "adaptive"; 3L -> "sync"; else -> "none"
+}
+
 @Composable
 fun OutputScreen(
     analyzer: AudioAnalyzer?,
@@ -842,48 +861,151 @@ fun OutputScreen(
     exclusive: Boolean,
     onExclusive: (Boolean) -> Unit,
     volume: Float,
-    onVolume: (Float) -> Unit
+    onVolume: (Float) -> Unit,
+    player: UsbDirectPlayer?,
+    hardwareVolume: Boolean,
+    onHardwareVolume: (Boolean) -> Unit
 ) {
     val transport = rememberTransport(transportFlow)
+
+    var tel by remember { mutableStateOf<Telemetry?>(null) }
+    var hwVol by remember { mutableStateOf<IntArray?>(null) }
+    var summary by remember { mutableStateOf("") }
+
+    // polled only while this screen is composed: no cost during playback elsewhere
+    LaunchedEffect(player, transport.playing) {
+        while (true) {
+            val raw = player?.telemetry() ?: LongArray(0)
+            tel = if (raw.size >= 17) Telemetry.from(raw) else null
+            hwVol = player?.hwVolumeInfo()
+            val s = player?.summary() ?: ""
+            if (s.isNotEmpty()) summary = s
+            delay(400)
+        }
+    }
+
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(22.dp))
             Text("Output", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(12.dp))
 
             Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    Text(dacName.ifEmpty { "no DAC connected" },
-                         style = MaterialTheme.typography.bodyLarge)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            dacName.ifEmpty { "no DAC connected" },
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        val perfect = exclusive && tel != null &&
+                                transport.format.isNotEmpty()
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (perfect) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text(
+                                if (perfect) "BIT-PERFECT" else
+                                    if (exclusive) "IDLE" else "MIXER",
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(4.dp))
                     Text(
                         if (transport.title.isEmpty()) "idle"
                         else "${transport.format.ifEmpty { "—" }}  ·  ${transport.title}",
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
-
+            Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Exclusive DAC", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         if (exclusive) "bit-perfect, this app owns the device"
                         else "Android mixer, other apps can play",
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(checked = exclusive, onCheckedChange = onExclusive)
             }
 
-            Spacer(Modifier.height(12.dp))
+            if (hwVol != null) {
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Hardware volume", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "DAC feature unit · %.1f dB".format(hwVol!![3] / 256.0),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = hardwareVolume, onCheckedChange = onHardwareVolume)
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("vol", style = MaterialTheme.typography.labelMedium)
                 Slider(value = volume, onValueChange = onVolume,
                        modifier = Modifier.weight(1f).padding(horizontal = 10.dp))
                 Text("${(volume * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            }
+
+            Spacer(Modifier.height(18.dp))
+            Text("Pipeline", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(6.dp))
+        }
+
+        item {
+            val t = tel
+            Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    if (t == null) {
+                        Text(
+                            "No active stream. Start playback to see live numbers.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Metric("Format", "${t.rate / 1000} kHz · ${t.bits}-bit · alt ${t.alt}" +
+                                " · ${syncName(t.sync)}")
+                        Metric("In flight", "${t.inflightMs} ms")
+                        Metric("Buffered", "${t.latencyMs} ms")
+                        Metric("Ring buffer", "${t.ringPct}%  (${t.filled} frames)")
+                        Metric("URBs reaped", "${t.urbs}   errors ${t.errors}")
+                        Metric("Underruns", "${t.underruns}")
+                        Metric(
+                            "URB interval",
+                            "min ${t.minUs / 1000} · avg ${t.avgUs / 1000} · " +
+                            "max ${t.maxUs / 1000} ms"
+                        )
+                        Metric("Endpoint", "maxpkt ${t.maxpkt}")
+                    }
+                }
+            }
+
+            if (summary.isNotEmpty()) {
+                Spacer(Modifier.height(18.dp))
+                Text("Descriptors", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(6.dp))
+                Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
             }
 
             Spacer(Modifier.height(20.dp))
@@ -895,7 +1017,17 @@ fun OutputScreen(
     }
 }
 
-/* ------------------------------------------------------------ settings */
+@Composable
+private fun Metric(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            label, style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(110.dp)
+        )
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
+}
 
 @Composable
 fun SettingsScreen(

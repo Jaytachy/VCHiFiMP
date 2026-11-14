@@ -31,7 +31,7 @@ class AudioAnalyzer {
     companion object {
         const val BANDS = 64
         private const val FFT_N = 8192
-        private const val RING = 1 shl 16
+        private const val RING = 1 shl 18   // must hold the full decode buffer (~2.7 s)
         private const val TICK_MS = 8L
         // The meter uses a much shorter window than the FFT: an 8192-point
         // window is 170 ms, which is far too slow to show a peak.
@@ -45,6 +45,8 @@ class AudioAnalyzer {
 
     private val ring = FloatArray(RING)
     @Volatile private var writeIdx = 0L
+    /** Frames to lag the analysis by so it matches what is actually audible. */
+    @Volatile var delayFrames: Long = 0
     @Volatile private var running = false
     private var worker: Thread? = null
 
@@ -57,19 +59,27 @@ class AudioAnalyzer {
     private val smoothed = FloatArray(BANDS) { -100f }
     private val bandLo = IntArray(BANDS)
     private val bandHi = IntArray(BANDS)
+    private var bandRate = 0
+    @Volatile private var sampleRate = 48000
     private var peakHold = -100f
     private var lastPeakHoldTick = 0L
     private var clipLatchUntil = 0L
 
-    init {
-        // log-spaced band edges, 20 Hz .. 20 kHz
-        val nyquist = 24000f
+    /** Must follow the device rate: the band edges are in Hz, not bins. */
+    fun setSampleRate(rate: Int) {
+        if (rate > 0) sampleRate = rate
+    }
+
+    private fun rebuildBands(rate: Int) {
+        val nyq = rate / 2f
+        val half = FFT_N / 2
         for (b in 0 until BANDS) {
-            val f0 = 20f * Math.pow(20000.0 / 20.0, b.toDouble() / BANDS).toFloat()
-            val f1 = 20f * Math.pow(20000.0 / 20.0, (b + 1).toDouble() / BANDS).toFloat()
-            bandLo[b] = ((f0 / nyquist) * (FFT_N / 2)).toInt().coerceIn(1, FFT_N / 2 - 1)
-            bandHi[b] = ((f1 / nyquist) * (FFT_N / 2)).toInt().coerceIn(bandLo[b] + 1, FFT_N / 2)
+            val f0 = 20f * Math.pow(1000.0, b.toDouble() / BANDS).toFloat()
+            val f1 = 20f * Math.pow(1000.0, (b + 1).toDouble() / BANDS).toFloat()
+            bandLo[b] = ((f0 / nyq) * half).toInt().coerceIn(1, half - 1)
+            bandHi[b] = ((f1 / nyq) * half).toInt().coerceIn(bandLo[b] + 1, half)
         }
+        bandRate = rate
     }
 
     /** Called from the audio thread. Must stay allocation-free and non-blocking. */
@@ -108,7 +118,10 @@ class AudioAnalyzer {
     }
 
     private fun analyse() {
-        val w = writeIdx
+        // The tap sits on the producer side of the ring, so the newest samples
+        // are future audio. Analyse at (writeIdx - buffered) instead.
+        val d = delayFrames.coerceIn(0, (RING - FFT_N).toLong())
+        val w = writeIdx - d
         if (w < FFT_N) return
         // most recent FFT_N samples
         for (n in 0 until FFT_N) {
