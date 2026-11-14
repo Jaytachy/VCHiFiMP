@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -176,70 +177,165 @@ fun MiniPlayer(
 @Composable
 fun HomeScreen(
     transportFlow: StateFlow<TransportState>?,
-    trackCount: Int,
-    albumCount: Int,
-    dacName: String,
+    lastPlayed: LastPlayed?,
+    albums: List<LibAlbum>,
+    artVersion: Int,
+    onResumeLast: () -> Unit,
     onShuffleAll: () -> Unit,
-    onPlayPause: () -> Unit,
-    onResumeLast: () -> Unit
+    onOpenAlbum: (LibAlbum) -> Unit,
+    onShortcut: (LibSection) -> Unit
 ) {
     val transport = rememberTransport(transportFlow)
+    val showingNow = transport.title.isNotEmpty()
+
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(26.dp))
             Text("VCHiFiMP", style = MaterialTheme.typography.headlineMedium)
             Text(
-                if (dacName.isEmpty()) "no DAC connected" else dacName,
-                style = MaterialTheme.typography.bodySmall
+                "Direct USB · bit-perfect when the file allows",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(Modifier.height(22.dp))
+        }
+
+        // ---- continue listening ----
+        val lp = lastPlayed
+        if (lp != null) {
+            item {
+                Text("Continue listening", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp))
+                Card(
+                    Modifier.fillMaxWidth().clickable { onResumeLast() },
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Row(
+                        Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ArtImage(lp.album, lp.artist, artVersion, Modifier.size(64.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                lp.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                lp.artist.ifEmpty { "Unknown artist" },
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (lp.codec.isNotEmpty()) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    lp.codec,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(onClick = onResumeLast) {
+                            Text(if (showingNow && transport.paused) "Resume" else "Play")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(22.dp))
+            }
+        }
+
+        // ---- shortcuts ----
+        item {
+            Text("Library", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ShortcutTile("Songs", Modifier.weight(1f)) { onShortcut(LibSection.SONGS) }
+                ShortcutTile("Albums", Modifier.weight(1f)) { onShortcut(LibSection.ALBUMS) }
+                ShortcutTile("Artists", Modifier.weight(1f)) { onShortcut(LibSection.ARTISTS) }
+            }
+            Spacer(Modifier.height(10.dp))
+            FilledTonalButton(onClick = onShuffleAll, modifier = Modifier.fillMaxWidth()) {
+                Text("Shuffle all")
+            }
             Spacer(Modifier.height(24.dp))
         }
 
-        if (transport.title.isNotEmpty()) {
+        // ---- quick picks ----
+        if (albums.isNotEmpty()) {
             item {
-                Text("Continue listening", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                Card(
-                    Modifier.fillMaxWidth().clickable { onPlayPause() },
-                    shape = RoundedCornerShape(18.dp)
+                Text("Albums", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(end = 4.dp)
                 ) {
-                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(transport.title, maxLines = 1,
-                                 overflow = TextOverflow.Ellipsis,
-                                 style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                fmtTime(transport.positionMs) + " / " +
-                                fmtTime(transport.durationMs),
-                                style = MaterialTheme.typography.bodySmall
-                            )
+                    items(
+                        albums.take(12),
+                        key = { it.name + "\u0000" + it.artist },
+                        contentType = { "album" }
+                    ) { a ->
+                        Column(
+                            Modifier.width(128.dp).clickable { onOpenAlbum(a) }
+                        ) {
+                            ArtImage(a.name, a.artist, artVersion,
+                                     Modifier.fillMaxWidth().aspectRatio(1f))
+                            Spacer(Modifier.height(6.dp))
+                            Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                 style = MaterialTheme.typography.bodySmall)
                         }
-                        Text(if (transport.playing) "Pause" else "Play")
                     }
                 }
                 Spacer(Modifier.height(20.dp))
+                Text(
+                    "${plural(albums.sumOf { it.tracks.size }, "track")}  ·  " +
+                    plural(albums.size, "album"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
             }
-        }
-
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledTonalButton(onClick = onShuffleAll, enabled = trackCount > 0) {
-                    Text("Shuffle all")
-                }
-                OutlinedButton(onClick = onResumeLast, enabled = transport.title.isNotEmpty()) {
-                    Text("Resume")
-                }
-            }
-            Spacer(Modifier.height(24.dp))
-            Text(
-                "$trackCount tracks  ·  $albumCount albums",
-                style = MaterialTheme.typography.bodySmall
-            )
         }
     }
 }
 
-/* --------------------------------------------------------------- music */
+@Composable
+private fun ShortcutTile(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    FilledTonalButton(onClick = onClick, modifier = modifier.padding(0.dp)) {
+        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis,
+             style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+/** Shared artwork box: keyed on album+artist so it follows the item it belongs to. */
+@Composable
+fun ArtImage(album: String, artist: String, artVersion: Int, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val key = album + "\u0000" + artist
+    var bitmap by remember(key, artVersion) {
+        mutableStateOf(ArtCache.peek(album, artist))
+    }
+    LaunchedEffect(key, artVersion) {
+        if (bitmap == null) bitmap = ArtCache.load(ctx, album, artist)
+    }
+    Box(
+        modifier.clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        val b = bitmap
+        if (b != null) {
+            Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else if (album.isNotEmpty()) {
+            Text(
+                album.take(1).uppercase(),
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 @Composable
 fun MusicScreen(
@@ -250,10 +346,11 @@ fun MusicScreen(
     artVersion: Int,
     onOpenAlbum: (LibAlbum) -> Unit,
     onPlayList: (List<LibTrack>, Int) -> Unit,
+    section: LibSection,
+    onSection: (LibSection) -> Unit,
     onChooseFolder: () -> Unit,
     onRescan: () -> Unit
 ) {
-    var section by remember { mutableStateOf(LibSection.SONGS) }
     var grid by remember { mutableStateOf(true) }
     var sort by remember { mutableStateOf(SortBy.TITLE) }
     var artistFilter by remember { mutableStateOf<String?>(null) }
@@ -357,7 +454,7 @@ fun MusicScreen(
                 LibSection.entries.forEachIndexed { i, sec ->
                     SegmentedButton(
                         selected = section == sec,
-                        onClick = { section = sec },
+                        onClick = { onSection(sec) },
                         shape = SegmentedButtonDefaults.itemShape(i, LibSection.entries.size)
                     ) { Text(sec.label) }
                 }
@@ -404,7 +501,7 @@ fun MusicScreen(
     }
 }
 
-private enum class LibSection(val label: String) { SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists") }
+enum class LibSection(val label: String) { SONGS("Songs"), ALBUMS("Albums"), ARTISTS("Artists") }
 
 private enum class SortBy(val label: String) {
     TITLE("Title"), ARTIST("Artist"), ALBUM("Album"), DURATION("Duration"), MODIFIED("Modified")
@@ -423,7 +520,18 @@ private fun SongList(
         return
     }
     LazyColumn(Modifier.fillMaxSize()) {
-        itemsIndexed(tracks) { i, t ->
+        itemsIndexed(
+            tracks,
+            key = { i, t -> t.uri.toString() + "#" + i },
+            contentType = { _, _ -> "song" }
+        ) { i, t ->
+            val subtitle = remember(t) {
+                listOfNotNull(
+                    t.artist.ifEmpty { null },
+                    fmtTime(t.durationMs),
+                    if (t.bitDepth > 0) "${t.bitDepth}-bit" else null
+                ).joinToString("  ·  ")
+            }
             Row(
                 Modifier.fillMaxWidth().clickable { onPlayList(tracks, i) }
                     .padding(horizontal = 20.dp, vertical = 6.dp),
@@ -435,11 +543,7 @@ private fun SongList(
                     Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
                          style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        listOfNotNull(
-                            t.artist.ifEmpty { null },
-                            fmtTime(t.durationMs),
-                            if (t.bitDepth > 0) "${t.bitDepth}-bit" else null
-                        ).joinToString("  ·  "),
+                        subtitle,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -469,7 +573,11 @@ private fun SongGrid(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        items(tracks.size) { i ->
+        items(
+            count = tracks.size,
+            key = { i -> tracks[i].uri.toString() + "#" + i },
+            contentType = { "song" }
+        ) { i ->
             val t = tracks[i]
             Column(Modifier.clickable { onPlayList(tracks, i) }) {
                 TrackArt(t, artVersion)
@@ -544,7 +652,11 @@ private fun AlbumGrid(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        items(albums, key = { it.name + it.artist }) { a ->
+        items(
+            albums,
+            key = { it.name + "\u0000" + it.artist },
+            contentType = { "album" }
+        ) { a ->
             AlbumCard(a, artVersion) { onOpenAlbum(a) }
         }
         item(span = { GridItemSpan(2) }) { Spacer(Modifier.height(8.dp)) }
@@ -554,7 +666,11 @@ private fun AlbumGrid(
 @Composable
 private fun AlbumList(albums: List<LibAlbum>, artVersion: Int, onOpenAlbum: (LibAlbum) -> Unit) {
     LazyColumn(Modifier.fillMaxSize()) {
-        items(albums, key = { it.name + it.artist }) { a ->
+        items(
+            albums,
+            key = { it.name + "\u0000" + it.artist },
+            contentType = { "album" }
+        ) { a ->
             Row(
                 Modifier.fillMaxWidth().clickable { onOpenAlbum(a) }
                     .padding(horizontal = 20.dp, vertical = 8.dp),
@@ -606,7 +722,11 @@ private fun ArtistList(
     onPick: (String) -> Unit
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
-        itemsIndexed(artists) { _, a ->
+        itemsIndexed(
+            artists,
+            key = { _, a -> a.first },
+            contentType = { _, _ -> "artist" }
+        ) { _, a ->
             ListItem(
                 headlineContent = { Text(a.first, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 supportingContent = {

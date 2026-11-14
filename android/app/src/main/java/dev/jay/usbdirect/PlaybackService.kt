@@ -22,6 +22,16 @@ import kotlinx.coroutines.flow.asStateFlow
 
 enum class RepeatMode { OFF, ALL, ONE }
 
+/** Persisted so Home can offer "continue listening" after a cold start. */
+data class LastPlayed(
+    val uri: String,
+    val title: String,
+    val artist: String,
+    val album: String,
+    val durationMs: Long,
+    val codec: String
+)
+
 data class Track(
     val uri: Uri,
     val title: String,
@@ -60,6 +70,8 @@ class PlaybackService : Service() {
     private val binder = LocalBinder()
     private val _state = MutableStateFlow(TransportState())
     private val _queueFlow = MutableStateFlow<List<Track>>(emptyList())
+    private val _lastPlayed = MutableStateFlow<LastPlayed?>(null)
+    val lastPlayed: StateFlow<LastPlayed?> = _lastPlayed.asStateFlow()
     val queueFlow: StateFlow<List<Track>> = _queueFlow.asStateFlow()
     val state: StateFlow<TransportState> = _state.asStateFlow()
 
@@ -134,6 +146,7 @@ class PlaybackService : Service() {
             isActive = true
         }
         createChannel()
+        loadLastPlayed()
         publish(PlaybackState.STATE_STOPPED)
     }
 
@@ -220,6 +233,40 @@ class PlaybackService : Service() {
         )
     }
 
+    private fun loadLastPlayed() {
+        val raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("lastPlayed", null) ?: return
+        runCatching {
+            val o = org.json.JSONObject(raw)
+            _lastPlayed.value = LastPlayed(
+                o.getString("uri"), o.getString("title"), o.optString("artist"),
+                o.optString("album"), o.optLong("durationMs"), o.optString("codec")
+            )
+        }
+    }
+
+    private fun saveLastPlayed(lp: LastPlayed) {
+        _lastPlayed.value = lp
+        val o = org.json.JSONObject().apply {
+            put("uri", lp.uri); put("title", lp.title); put("artist", lp.artist)
+            put("album", lp.album); put("durationMs", lp.durationMs); put("codec", lp.codec)
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString("lastPlayed", o.toString()).apply()
+    }
+
+    /** Used by Home on a cold start, when no queue exists yet. */
+    fun resumeLast() {
+        val lp = _lastPlayed.value ?: return
+        if (device == null) {
+            _state.value = _state.value.copy(error = "no USB DAC selected")
+            return
+        }
+        setQueue(
+            listOf(Track(Uri.parse(lp.uri), lp.title, lp.durationMs, lp.artist, lp.album, lp.codec)),
+            0
+        )
+    }
+
     fun playAt(i: Int, fromMs: Long = 0L) {
         Log.i("VCProbe", "playAt($i, fromMs=$fromMs)")
         val t = queue.getOrNull(i) ?: return
@@ -235,6 +282,8 @@ class PlaybackService : Service() {
             positionMs = fromMs, durationMs = t.durationMs, error = null,
             artist = t.artist, album = t.album, codec = codec, format = ""
         )
+        saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
+                                   t.durationMs, codec))
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
         player.start(d, t.uri, 48000, bits, volume, fromMs, useMixer = !exclusive)
@@ -408,6 +457,7 @@ class PlaybackService : Service() {
 
     companion object {
         private const val CHANNEL = "playback"
+        private const val PREFS = "vc"
         private const val NOTIF_ID = 1
         const val ACTION_STOP = "dev.jay.usbdirect.STOP"
         const val ACTION_PAUSE = "dev.jay.usbdirect.PAUSE"

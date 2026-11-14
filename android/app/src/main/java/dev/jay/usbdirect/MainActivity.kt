@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
     private var tab by mutableStateOf(Tab.HOME)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
     private var folderLabel by mutableStateOf("")
+    private var librarySection by mutableStateOf(LibSection.SONGS)
+    private var lastPlayed by mutableStateOf<LastPlayed?>(null)
     private var artVersion by mutableStateOf(0)
     private var showNowPlaying by mutableStateOf(false)
     private var showQueue by mutableStateOf(false)
@@ -66,6 +68,9 @@ class MainActivity : ComponentActivity() {
             service = svc
             svc.setVolume(volume)
             svc.setExclusive(exclusive)
+            // needed so Home's "continue listening" can start on a cold launch
+            audioDevice()?.let { d -> if (usbManager.hasPermission(d)) svc.setDevice(d, 24, volume) }
+            lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
             lifecycleScope.launch { svc.queueFlow.collect { queueTracks = it } }
 
             intent?.getStringExtra("debugfile")?.let { path ->
@@ -260,15 +265,16 @@ class MainActivity : ComponentActivity() {
                             } else when (tab) {
                                 Tab.HOME -> HomeScreen(
                                     transportFlow = service?.state,
-                                    trackCount = tracks.size,
-                                    albumCount = albums.size,
-                                    dacName = dacName,
+                                    lastPlayed = lastPlayed,
+                                    albums = albums,
+                                    artVersion = artVersion,
+                                    onResumeLast = { service?.resumeLast() },
                                     onShuffleAll = { shuffleAll() },
-                                    onPlayPause = {
-                                        if (service?.state?.value?.playing == true) service?.pause()
-                                        else service?.resume()
-                                    },
-                                    onResumeLast = { service?.resume() }
+                                    onOpenAlbum = { openAlbum = it },
+                                    onShortcut = {
+                                        librarySection = it
+                                        tab = Tab.MUSIC
+                                    }
                                 )
                                 Tab.MUSIC -> MusicScreen(
                                     albums = albums,
@@ -276,6 +282,8 @@ class MainActivity : ComponentActivity() {
                                     scanning = scanning,
                                     scanState = scanState,
                                     artVersion = artVersion,
+                                    section = librarySection,
+                                    onSection = { librarySection = it },
                                     onOpenAlbum = { openAlbum = it },
                                     onPlayList = { list, i -> playList(list, i) },
                                     onChooseFolder = { picker.launch(null) },

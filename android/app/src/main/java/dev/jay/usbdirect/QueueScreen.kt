@@ -66,7 +66,11 @@ fun QueueSheet(
             }
 
             LazyColumn(Modifier.fillMaxSize()) {
-                itemsIndexed(tracks) { i, t ->
+                itemsIndexed(
+                    tracks,
+                    key = { i, t -> t.uri.toString() + "#" + i },
+                    contentType = { _, _ -> "queue" }
+                ) { i, t ->
                     val active = i == current
                     ListItem(
                         headlineContent = {

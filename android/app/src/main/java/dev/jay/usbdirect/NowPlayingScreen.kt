@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
  * Full-screen player. The queue opens *inside* this screen: the player shrinks
  * upward and the sheet takes the lower half, so playback context is never lost.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NowPlayingScreen(
     transportFlow: kotlinx.coroutines.flow.StateFlow<TransportState>?,
@@ -166,12 +167,35 @@ fun NowPlayingScreen(
 
                 Spacer(Modifier.height(14.dp))
 
+                // slim custom track + compact thumb; M3's default is ~16 dp
                 Slider(
                     value = (if (dragging) dragPos else transport.positionMs.toFloat())
                         .coerceIn(0f, dur.toFloat()),
                     valueRange = 0f..dur.toFloat(),
                     onValueChange = { dragging = true; dragPos = it },
-                    onValueChangeFinished = { dragging = false; onSeek(dragPos.toLong()) }
+                    onValueChangeFinished = { dragging = false; onSeek(dragPos.toLong()) },
+                    thumb = {
+                        Box(
+                            Modifier.size(12.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                        )
+                    },
+                    track = { state ->
+                        val frac = (state.value / dur.toFloat()).coerceIn(0f, 1f)
+                        Box(
+                            Modifier.fillMaxWidth().height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.28f)
+                                )
+                        ) {
+                            Box(
+                                Modifier.fillMaxWidth(frac).fillMaxHeight()
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                        }
+                    }
                 )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(
