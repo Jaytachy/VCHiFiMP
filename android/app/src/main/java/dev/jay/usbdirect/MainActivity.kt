@@ -79,14 +79,24 @@ class MainActivity : ComponentActivity() {
 
             if (intent?.getBooleanExtra("autoplayalbum", false) == true) {
               android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                albums.maxByOrNull { it.tracks.size }?.let { a ->
-                    Log.i("VCProbe", "debug album: ${a.name} (${a.tracks.size} tracks)")
-                    playList(a.tracks, 0)
+                val debugList: List<LibTrack> =
+                    if (intent.getBooleanExtra("crossalbum", false))
+                        albums.take(6).mapNotNull { it.tracks.firstOrNull() }
+                    else albums.maxByOrNull { it.tracks.size }?.tracks ?: emptyList()
+                if (debugList.isNotEmpty()) {
+                    Log.i("VCProbe", "debug queue: ${debugList.size} tracks, first=" +
+                            "${debugList.first().album}")
+                    playList(debugList, 0)
                     if (intent.getBooleanExtra("shuffle", false)) {
                         svc.setShuffle(true)
                         Log.i("VCProbe", "debug shuffle on")
                     }
                     if (intent.getBooleanExtra("repeatone", false)) svc.setRepeat(RepeatMode.ONE)
+                    if (intent.getBooleanExtra("skiptest", false)) {
+                        val h = android.os.Handler(android.os.Looper.getMainLooper())
+                        h.postDelayed({ svc.next() }, 6000)
+                        Log.i("VCProbe", "skiptest scheduled")
+                    }
                     if (intent.getBooleanExtra("pausetest", false)) {
                         val h = android.os.Handler(android.os.Looper.getMainLooper())
                         h.postDelayed({ svc.pause() }, 8000)
@@ -192,11 +202,6 @@ class MainActivity : ComponentActivity() {
                     if (showNowPlaying) {
                         NowPlayingScreen(
                             transportFlow = service?.state,
-                            art = ArtStore.existing(
-                                this@MainActivity,
-                                service?.state?.value?.album ?: "",
-                                service?.state?.value?.artist ?: ""
-                            ),
                             volume = volume,
                             onClose = { showNowPlaying = false },
                             onPlayPause = {

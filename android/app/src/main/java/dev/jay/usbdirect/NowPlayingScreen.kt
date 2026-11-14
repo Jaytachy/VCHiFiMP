@@ -1,6 +1,5 @@
 package dev.jay.usbdirect
 
-import android.graphics.BitmapFactory
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,10 +28,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import java.io.File
 
 /**
  * Full-screen player. The queue opens *inside* this screen: the player shrinks
@@ -41,7 +40,6 @@ import java.io.File
 @Composable
 fun NowPlayingScreen(
     transportFlow: kotlinx.coroutines.flow.StateFlow<TransportState>?,
-    art: File?,
     volume: Float,
     showQueue: Boolean,
     queueTracks: List<Track>,
@@ -57,8 +55,18 @@ fun NowPlayingScreen(
     onCycleRepeat: () -> Unit = {}
 ) {
     val transport = rememberTransport(transportFlow)
-    val bitmap = remember(art) {
-        art?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
+
+    // Artwork must follow the *current* track. Resolving it outside this
+    // composable from service.state.value gave a one-shot snapshot, so skipping
+    // to another album kept the previous cover until something else forced a
+    // recomposition.
+    val ctx = LocalContext.current
+    val artKey = transport.album + "\u0000" + transport.artist
+    var bitmap by remember(artKey) {
+        mutableStateOf(ArtCache.peek(transport.album, transport.artist))
+    }
+    LaunchedEffect(artKey) {
+        bitmap = ArtCache.load(ctx, transport.album, transport.artist)
     }
 
     var dragging by remember { mutableStateOf(false) }
@@ -69,9 +77,10 @@ fun NowPlayingScreen(
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
 
-        if (bitmap != null) {
+        val bg = bitmap
+        if (bg != null) {
             Image(
-                bitmap = bitmap, contentDescription = null,
+                bitmap = bg, contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().blur(56.dp).alpha(0.5f)
             )
@@ -128,9 +137,10 @@ fun NowPlayingScreen(
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (bitmap != null) {
+                    val cover = bitmap
+                    if (cover != null) {
                         Image(
-                            bitmap = bitmap, contentDescription = transport.album,
+                            bitmap = cover, contentDescription = transport.album,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )

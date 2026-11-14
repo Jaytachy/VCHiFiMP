@@ -28,6 +28,9 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetPpm(handle, ppm)
     }
 
+    /** Frames the device has actually consumed (completed URBs), not queued. */
+    fun framesPlayed(): Long = if (handle != 0L) nativeFramesPlayed(handle) else 0L
+
     /** Tell the engine the producer is done, so it can fade out cleanly. */
     fun eos() {
         if (handle != 0L) nativeEos(handle)
@@ -45,6 +48,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetVolume(h: Long, v: Float)
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeEos(h: Long)
+    private external fun nativeFramesPlayed(h: Long): Long
     private external fun nativeClose(h: Long)
 
     companion object {

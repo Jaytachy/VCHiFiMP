@@ -370,12 +370,15 @@ class UsbDirectPlayer(private val context: Context) {
     private interface PcmTarget {
         fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int): Int
         fun eos()
+        /** Frames actually consumed by the sink, not frames handed to it. */
+        fun playedFrames(): Long
     }
 
     private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
         override fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int) =
             eng.write(buf, frames)
         override fun eos() = eng.eos()
+        override fun playedFrames(): Long = eng.framesPlayed()
     }
 
     private class MixerTarget(
@@ -393,6 +396,8 @@ class UsbDirectPlayer(private val context: Context) {
             return track.write(bytes, frames * 8, AudioTrack.WRITE_BLOCKING)
         }
         override fun eos() { /* nothing queued to flush */ }
+        override fun playedFrames(): Long =
+            track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
     }
 
     private class PcmSink(
@@ -485,8 +490,12 @@ class UsbDirectPlayer(private val context: Context) {
             target.write(direct, directBytes, frames)
             direct.clear()
             framesOut += frames
-            val ms = startMs + framesOut * 1000L / outRate
-            if (ms - lastReportMs >= 250) {
+            // Report what the DAC has consumed, not what we queued: the ring
+            // holds ~3 s, and using the producer cursor made every pause/resume
+            // skip exactly that buffer.
+            val played = target.playedFrames()
+            val ms = startMs + played * 1000L / outRate
+            if (ms - lastReportMs >= 200) {
                 lastReportMs = ms
                 progress?.invoke(ms)
             }

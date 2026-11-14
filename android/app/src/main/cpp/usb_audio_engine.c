@@ -88,6 +88,7 @@ struct uae {
     float volume;
     double ppm;
     uint64_t rendered;      /* frames packed since open */
+    volatile uint64_t frames_done;  /* frames in URBs the kernel has completed */
     float gain;             /* fade in/out state */
     int ending;             /* source ran dry: fade out and stay silent */
     volatile int eos;       /* producer says: no more samples coming */
@@ -396,6 +397,9 @@ static void *pump(void *arg)
         }
         struct urb_ctx *c = (struct urb_ctx *)u->usercontext;
         c->submitted = 0;
+        // A completed URB means the host controller has handed those frames to
+        // the device: this is the only honest "played" counter we have.
+        e->frames_done += u->buffer_length / (unsigned)e->bpf;
         if ((++reaped % 500) == 0)
             LOGI("uae: reaped=%d status=%d len=%u", reaped, u->status, u->actual_length);
         if (u->status && reaped < 600)
@@ -481,6 +485,7 @@ struct uae *uae_open(int fd, int rate, int bits)
     e->ppm     = 0.0;
     e->gain    = 0.0f;
     e->rendered = 0;
+    e->frames_done = 0;
     e->ending  = 0;
 
     /* Android keeps snd-usb-audio bound to the DAC. claimInterface(force=true)
@@ -625,6 +630,11 @@ void uae_set_volume(struct uae *e, float v)
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     e->volume = v;
+}
+
+uint64_t uae_frames_played(struct uae *e)
+{
+    return e ? e->frames_done : 0;
 }
 
 void uae_set_eos(struct uae *e)

@@ -64,6 +64,12 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetVolume(JNIEnv *env, jobject thiz,
     uae_set_volume((struct uae *)(intptr_t)h, v);
 }
 
+JNIEXPORT jlong JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeFramesPlayed(JNIEnv *env, jobject thiz, jlong h)
+{
+    return (jlong)uae_frames_played((struct uae *)(intptr_t)h);
+}
+
 JNIEXPORT void JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetPpm(JNIEnv *env, jobject thiz,
                                                    jlong h, jfloat ppm)
