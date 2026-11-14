@@ -21,15 +21,38 @@ rate it asked for.
 
 ## What it does today
 
+Core:
+
 - Reads WAV/FLAC/etc. and decodes to PCM (`libsndfile` on Linux,
   MediaCodec on Android).
 - Parses the device's USB audio descriptors itself and picks the matching
-  interface/alt setting (S16 or S24_3LE, 44.1/48/96 kHz).
+  interface/alt setting (S16 or S24_3LE, 44.1/48/96 kHz), 24-bit by default or
+  16-bit when selected in Settings.
 - Streams with a 12-URB pipeline of 8 one-millisecond isochronous packets.
 - Supports fractional packet sizes, so 44.1 kHz works as alternating
   44/45-frame packets instead of being resampled.
-- Software volume + TPDF dither, applied in float before packing.
-- Resamples content the DAC cannot take natively.
+- Software volume + TPDF dither (switchable), applied in float before packing.
+- Resamples only content the DAC cannot take natively, with
+  `SRC_SINC_MEDIUM/BEST/FASTEST` selectable.
+- True gapless continuation between same-format tracks: one decode thread, one
+  ring, metadata flips on the audible sample boundary.
+- UAC Feature Unit hardware volume, with float gain locked at unity when active.
+
+Android app (`v1.0.0`):
+
+- SAF library scan with JSON cache, tags, Songs/Albums/Artists, search, sort,
+  favourites, queue sheet, shuffle and 3-state repeat.
+- Album and artist detail screens, track action sheet (play next, enqueue,
+  favourite, go to album).
+- Floating mini-player and full-screen Now Playing with dynamic album-art
+  colours, swipe-to-dismiss and a play/pause cover scale.
+- Foreground `PlaybackService` with MediaSession, lock screen and media keys.
+- Output tab with live pipeline telemetry (URBs, underruns, jitter, ring fill),
+  FFT spectrum, level meter and DAC descriptor tree.
+- Settings hub: output depth, resampler quality, dither, gapless, DAC
+  re-claim on replug, sleep timer, theme, dynamic colours, short-track filter.
+- USB detach keeps the playing track and pauses on the audible frame; the DAC
+  is re-claimed automatically when it comes back.
 
 ## Layout
 
@@ -56,8 +79,9 @@ own clocking.
 
 ## Status
 
-Working on Linux (measured, see below). Android builds and runs, and does not
-need root — see the claim sequence.
+`v1.0.0` — Android app and Linux reference player both working; no root
+required (see the claim sequence). Release builds are minified with R8 and
+shrink resources (5.6 MB APK versus 20 MB debug).
 
 ## Verified on hardware
 
@@ -123,22 +147,22 @@ Android: open `android/` in Android Studio and build. Requires NDK and CMake.
 
 ## Known issues
 
-- **Mixer mode is silent.** Root cause confirmed on device: after a raw session
-  the app re-issues `SETCONFIGURATION` to hand the device back, but that
-  sometimes fails with `EBADF` because the usbfs fd is invalidated by the
-  reconfiguration. `snd-usb-audio` then stays unbound and there is no ALSA card
-  for `AudioTrack` to route to. Symptom: mixer mode opens its sink, position
-  stays at 0:00, no sound. Workaround: replug the DAC. Proper fix: detect the
-  unbound state and refuse mixer playback with a clear message, or rebind
-  another way.
-- Pause resumes from the position at the moment of the tap, which can be a few
-  hundred ms behind the audio actually heard (buffer in flight).
-- Cached library keeps URIs for files deleted outside the app; playing one
-  fails silently.
+- **Release signing.** `android/app/build.gradle.kts` reads
+  `android/keystore.properties` (gitignored) and falls back to the debug key
+  when it is absent, so the current v1.0.0 APK is debug-signed. Add the
+  properties file and rebuild to produce a proper release signature.
+- **Mixer mode depends on the kernel driver.** Phone/speaker playback always
+  works, but routing the mixer path through the DAC needs `snd-usb-audio`
+  bound; if it is not, audio goes to the speaker until the DAC is replugged.
+  The exclusive/bit-perfect path is unaffected.
+- **16-bit mode is global.** Selecting 16-bit quantises everything (with
+  dither) instead of per-track alt selection; 24-bit remains the default.
+- **24-bit → 16-bit alt switching in place is not exercised** by normal
+  playback because the app requests one output depth at a time.
 
 ## Next
 
-- Library/Now Playing UI overhaul (album art, better hierarchy).
-- Glitch-free rate switching between tracks of different rates.
-- Vendor `libsamplerate` for 88.2/192 kHz sources.
-- Release signing.
+- Per-track alt-setting selection (16-bit only when the source is 16-bit).
+- Proper release keystore in CI, signed `v1.x` artifacts.
+- Scroll/performance profiling with Perfetto.
+- Widget and Android Auto surface.
