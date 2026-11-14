@@ -89,7 +89,13 @@ class PlaybackService : Service() {
         super.onCreate()
         player = UsbDirectPlayer(this).apply {
             onInfo = { Log.i("VCProbe", "player: $it") }
-            onProgress = { ms -> _state.value = _state.value.copy(positionMs = ms) }
+            onProgress = { ms ->
+                // Late callbacks from the dying decode thread must not move the
+                // position after pause; that is what made the resume point drift.
+                if (_state.value.playing && !suppressFinish) {
+                    _state.value = _state.value.copy(positionMs = ms)
+                }
+            }
             onFormat = { rate, bits ->
                 val c = _state.value.codec
                 _state.value = _state.value.copy(
@@ -215,6 +221,7 @@ class PlaybackService : Service() {
     }
 
     fun playAt(i: Int, fromMs: Long = 0L) {
+        Log.i("VCProbe", "playAt($i, fromMs=$fromMs)")
         val t = queue.getOrNull(i) ?: return
         val d = device ?: run {
             _state.value = _state.value.copy(error = "no USB DAC selected")
@@ -238,6 +245,7 @@ class PlaybackService : Service() {
     fun pause() {
         if (!_state.value.playing) return
         pausedAtMs = _state.value.positionMs
+        Log.i("VCProbe", "pause: pos=${_state.value.positionMs} -> pausedAt=$pausedAtMs")
         suppressFinish = true
         _state.value = _state.value.copy(playing = false, paused = true)
         player.stop()
@@ -249,6 +257,7 @@ class PlaybackService : Service() {
     }
 
     fun resume() {
+        Log.i("VCProbe", "resume: pausedAt=$pausedAtMs idx=$index")
         if (index >= 0) playAt(index, pausedAtMs)
     }
 
@@ -317,7 +326,8 @@ class PlaybackService : Service() {
 
     private fun startForegroundInternal(title: String) {
         val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val playing = _state.value.playing
 
@@ -330,7 +340,7 @@ class PlaybackService : Service() {
         val stopIntent = PendingIntent.getService(
             this, 1,
             Intent(this, PlaybackService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
         val n: Notification = Notification.Builder(this, CHANNEL)
@@ -361,13 +371,23 @@ class PlaybackService : Service() {
 
     private fun publish(state: Int) {
         val s = _state.value
+        // Speed must be 0 unless actually playing. Publishing 1.0 while paused
+        // made the platform extrapolate the position with wall-clock time; its
+        // seek-to-then-play round trip then poisoned pausedAtMs with the
+        // extrapolated value, which is why resume jumped by the pause duration.
+        val speed = if (state == PlaybackState.STATE_PLAYING) 1.0f else 0.0f
+        val pos = when (state) {
+            PlaybackState.STATE_PAUSED -> pausedAtMs
+            PlaybackState.STATE_STOPPED -> 0L
+            else -> s.positionMs
+        }
         val pb = PlaybackState.Builder()
             .setActions(
                 PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
                 PlaybackState.ACTION_STOP or PlaybackState.ACTION_SKIP_TO_NEXT or
                 PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO
             )
-            .setState(state, s.positionMs, 1.0f)
+            .setState(state, pos, speed)
             .build()
         session.setPlaybackState(pb)
         val track = queue.getOrNull(s.index)

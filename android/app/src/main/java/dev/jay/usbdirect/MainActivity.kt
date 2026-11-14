@@ -87,6 +87,12 @@ class MainActivity : ComponentActivity() {
                         Log.i("VCProbe", "debug shuffle on")
                     }
                     if (intent.getBooleanExtra("repeatone", false)) svc.setRepeat(RepeatMode.ONE)
+                    if (intent.getBooleanExtra("pausetest", false)) {
+                        val h = android.os.Handler(android.os.Looper.getMainLooper())
+                        h.postDelayed({ svc.pause() }, 8000)
+                        h.postDelayed({ svc.resume() }, 22000)
+                        Log.i("VCProbe", "pausetest scheduled")
+                    }
                 }
               }, 700)
             }
