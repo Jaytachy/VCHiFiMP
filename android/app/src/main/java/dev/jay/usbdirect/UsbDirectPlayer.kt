@@ -484,18 +484,35 @@ class UsbDirectPlayer(private val context: Context) {
         private val progress: ((Long) -> Unit)?,
         private val tap: ((FloatBuffer, Int) -> Unit)?
     ) {
+        private companion object {
+            const val BLOCK = 2048              // frames per resampler pass
+            const val OUT_MAX = BLOCK * 3       // generous headroom above any ratio
+        }
+
+        private val passthrough = srcRate == outRate
+        private val resampler =
+            if (passthrough) null else NativeResampler(2, outRate.toDouble() / srcRate)
+
+        private val outBytes: ByteBuffer =
+            ByteBuffer.allocateDirect(OUT_MAX * 2 * 4).order(ByteOrder.nativeOrder())
+        private val outBuf: FloatBuffer = outBytes.asFloatBuffer()
+
+        private val inBytes: ByteBuffer =
+            ByteBuffer.allocateDirect(BLOCK * 2 * 4).order(ByteOrder.nativeOrder())
+        private val inBuf: FloatBuffer = inBytes.asFloatBuffer()
+
+        private val stage = FloatArray(BLOCK * 2)
+        private var stageFrames = 0
+
         private var lastReportMs = 0L
         private var framesOut = 0L
-        private val ratio = srcRate.toDouble() / outRate.toDouble()
-        private val chunk = 4096
-        private val directBytes: ByteBuffer =
-            ByteBuffer.allocateDirect(chunk * 2 * 4).order(ByteOrder.nativeOrder())
-        private val direct: FloatBuffer = directBytes.asFloatBuffer()
 
-        private var t = 0.0
-        private var prevL = 0f
-        private var prevR = 0f
-        private var havePrev = false
+        init {
+            // linear interpolation is gone: equal rates pass through untouched
+            if (resampler != null && !resampler.isOk) {
+                android.util.Log.e("VCProbe", "resampler init failed")
+            }
+        }
 
         fun pushShorts(buf: java.nio.ShortBuffer) {
             val frames = buf.remaining() / srcCh
@@ -503,9 +520,8 @@ class UsbDirectPlayer(private val context: Context) {
                 val l = buf.get().toFloat() / 32768f
                 val r = if (srcCh >= 2) buf.get().toFloat() / 32768f else l
                 for (k in 2 until srcCh) buf.get()
-                frame(l, r)
+                emit(l, r)
             }
-            flushChunk()
         }
 
         fun push24(buf: ByteBuffer) {
@@ -514,9 +530,18 @@ class UsbDirectPlayer(private val context: Context) {
                 val l = read24(buf)
                 val r = if (srcCh >= 2) read24(buf) else l
                 for (k in 2 until srcCh) buf.position(buf.position() + 3)
-                frame(l, r)
+                emit(l, r)
             }
-            flushChunk()
+        }
+
+        fun pushFloat(buf: FloatBuffer) {
+            val frames = buf.remaining() / srcCh
+            for (i in 0 until frames) {
+                val l = buf.get()
+                val r = if (srcCh >= 2) buf.get() else l
+                for (k in 2 until srcCh) buf.get()
+                emit(l, r)
+            }
         }
 
         private fun read24(b: ByteBuffer): Float {
@@ -528,46 +553,40 @@ class UsbDirectPlayer(private val context: Context) {
             return v / 8388608f
         }
 
-        fun pushFloat(buf: FloatBuffer) {
-            val frames = buf.remaining() / srcCh
-            for (i in 0 until frames) {
-                val l = buf.get()
-                val r = if (srcCh >= 2) buf.get() else l
-                for (k in 2 until srcCh) buf.get()
-                frame(l, r)
-            }
-            flushChunk()
-        }
-
-        private fun frame(l: Float, r: Float) {
-            if (!havePrev) { prevL = l; prevR = r; havePrev = true; return }
-            while (t < 1.0) {
-                val a = t.toFloat()
-                emit(prevL + (l - prevL) * a, prevR + (r - prevR) * a)
-                t += ratio
-            }
-            t -= 1.0
-            prevL = l; prevR = r
-        }
-
         private fun emit(l: Float, r: Float) {
-            if (direct.remaining() < 2) flushChunk()
-            direct.put(l); direct.put(r)
+            if (passthrough) {
+                outBuf.put(l); outBuf.put(r)
+                if (outBuf.position() >= OUT_MAX * 2) flushOut()
+            } else {
+                stage[stageFrames * 2] = l
+                stage[stageFrames * 2 + 1] = r
+                stageFrames++
+                if (stageFrames == BLOCK) processBlock()
+            }
         }
 
-        private fun flushChunk() {
-            val frames = direct.position() / 2
-            if (frames == 0) return
-            direct.flip()
-            tap?.invoke(direct, frames)
-            directBytes.position(0)
-            directBytes.limit(frames * 8)
-            target.write(direct, directBytes, frames)
-            direct.clear()
+        private fun processBlock() {
+            val rs = resampler ?: return
+            inBuf.clear()
+            inBuf.put(stage, 0, stageFrames * 2)
+            stageFrames = 0
+            outBuf.clear()
+            val produced = rs.process(inBuf, BLOCK, outBuf, OUT_MAX)
+            if (produced > 0) flushOut(produced)
+        }
+
+        private fun flushOut(frames: Int = outBuf.position() / 2) {
+            if (frames <= 0) return
+            // libsamplerate writes into the direct buffer without moving the
+            // FloatBuffer position, so set the window explicitly.
+            outBuf.position(0)
+            outBuf.limit(frames * 2)
+            val start = framesOut
+            tap?.invoke(outBuf, frames)
+            target.write(outBuf, outBytes, frames)
+            outBuf.clear()
             framesOut += frames
-            // Report what the DAC has consumed, not what we queued: the ring
-            // holds ~3 s, and using the producer cursor made every pause/resume
-            // skip exactly that buffer.
+
             val played = target.playedFrames()
             val ms = startMs + played * 1000L / outRate
             if (ms - lastReportMs >= 200) {
@@ -576,6 +595,15 @@ class UsbDirectPlayer(private val context: Context) {
             }
         }
 
-        fun flush() = flushChunk()
+        fun flush() {
+            if (!passthrough && stageFrames > 0) processBlock()
+            val rs = resampler
+            if (rs != null) {
+                outBuf.clear()
+                val produced = rs.flush(outBuf, OUT_MAX)
+                if (produced > 0) flushOut(produced)
+            }
+            flushOut()
+        }
     }
 }
