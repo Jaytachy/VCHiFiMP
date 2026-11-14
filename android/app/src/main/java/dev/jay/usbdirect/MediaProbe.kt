@@ -13,7 +13,9 @@ object MediaProbe {
         val sampleRate: Int,
         val channels: Int,
         val durationMs: Long,
-        val mime: String
+        val mime: String,
+        /** 16/24 when the container reports it, else 0. */
+        val bitDepth: Int = 0
     )
 
     fun of(context: Context, uri: Uri): Info? {
@@ -32,11 +34,16 @@ object MediaProbe {
                 if (!mime.startsWith("audio/")) continue
                 val durUs = if (f.containsKey(MediaFormat.KEY_DURATION))
                     f.getLong(MediaFormat.KEY_DURATION) else 0L
+                val bits = runCatching {
+                    if (f.containsKey("bits-per-sample")) f.getInteger("bits-per-sample")
+                    else 0
+                }.getOrDefault(0)
                 return Info(
                     sampleRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE),
                     channels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
                     durationMs = durUs / 1000,
-                    mime = mime
+                    mime = mime,
+                    bitDepth = bits
                 )
             }
             null

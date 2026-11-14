@@ -19,7 +19,8 @@ data class LibTrack(
     val codec: String = "",
     val modifiedMs: Long = 0L
 ) {
-    fun toQueueTrack() = Track(uri, title, durationMs, artist, album, codec)
+    fun toQueueTrack() =
+        Track(uri, title, durationMs, artist, album, codec, bitDepth)
 }
 
 data class LibAlbum(

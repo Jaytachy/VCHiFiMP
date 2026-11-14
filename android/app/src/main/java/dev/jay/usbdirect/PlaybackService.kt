@@ -41,7 +41,9 @@ data class Track(
     val durationMs: Long = 0L,
     val artist: String = "",
     val album: String = "",
-    val codec: String = ""
+    val codec: String = "",
+    /** Source bit depth when known; 0 means "probe at play time". */
+    val bitDepth: Int = 0
 )
 
 data class TransportState(
@@ -97,7 +99,8 @@ class PlaybackService : Service() {
     private var device: UsbDevice? = null
     private var pausedAtMs = 0L
     private var volume = 0.2f
-    private var bits = 24
+    /** 0 = match each source track, else fixed 16/24. */
+    private var bits = 0
     private var exclusive = true
     private var hardwareVolume = false
     @Volatile private var suppressFinish = false
@@ -145,7 +148,9 @@ class PlaybackService : Service() {
                 }
             }
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-            bits = prefs.getInt("outBits", 24)
+            bits = prefs.getInt("outBits", 0)
+            // receiver here is the player being constructed
+            setBitDepthPolicy(auto = bits == 0, bits = if (bits == 0) 24 else bits)
             gaplessEnabled = prefs.getBoolean("gapless", true)
             autoReclaim = prefs.getBoolean("autoReclaim", true)
             // inside apply{} the receiver is the player we are constructing
@@ -346,6 +351,7 @@ class PlaybackService : Service() {
         }
         val d = device
         val mixer = !exclusive || d == null
+        val outBits = bitsFor(t)
         index = i
         pausedAtMs = fromMs
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
@@ -359,7 +365,7 @@ class PlaybackService : Service() {
                                    t.durationMs, codec))
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
-        player.start(d, t.uri, 48000, bits, volume, fromMs, useMixer = mixer)
+        player.start(d, t.uri, 48000, outBits, volume, fromMs, useMixer = mixer)
     }
 
     fun play() = if (index >= 0) playAt(index, pausedAtMs) else Unit
@@ -428,8 +434,21 @@ class PlaybackService : Service() {
     }
 
     fun setOutputBits(b: Int) {
-        bits = if (b == 16) 16 else 24
+        bits = when (b) { 16 -> 16; 24 -> 24; else -> 0 }
+        setBitDepthPolicy()
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("outBits", bits).apply()
+    }
+
+    private fun setBitDepthPolicy() {
+        player.setBitDepthPolicy(auto = bits == 0, bits = if (bits == 0) 24 else bits)
+    }
+
+    /** Output depth for this track under the current policy. */
+    private fun bitsFor(t: Track): Int {
+        if (bits != 0) return bits
+        if (t.bitDepth == 16 || t.bitDepth == 24) return t.bitDepth
+        val probed = MediaProbe.of(this, t.uri)?.bitDepth ?: 0
+        return if (probed == 16 || probed == 24) probed else 24
     }
 
     fun outputBits(): Int = bits

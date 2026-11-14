@@ -26,8 +26,10 @@ Core:
 - Reads WAV/FLAC/etc. and decodes to PCM (`libsndfile` on Linux,
   MediaCodec on Android).
 - Parses the device's USB audio descriptors itself and picks the matching
-  interface/alt setting (S16 or S24_3LE, 44.1/48/96 kHz), 24-bit by default or
-  16-bit when selected in Settings.
+  interface/alt setting (S16 or S24_3LE, 44.1/48/96 kHz). Output depth defaults
+  to **Auto**, which follows each track's source: 16-bit files take alt 1,
+  24-bit files take alt 2, with an in-place `uae_switch_format` when the depth
+  changes between tracks.
 - Streams with a 12-URB pipeline of 8 one-millisecond isochronous packets.
 - Supports fractional packet sizes, so 44.1 kHz works as alternating
   44/45-frame packets instead of being resampled.
@@ -79,7 +81,7 @@ own clocking.
 
 ## Status
 
-`v1.0.0` — Android app and Linux reference player both working; no root
+`v1.0.1` — Android app and Linux reference player both working; no root
 required (see the claim sequence). Release builds are minified with R8 and
 shrink resources (5.6 MB APK versus 20 MB debug).
 
@@ -112,12 +114,23 @@ caller — so the switch always fails.
 
 What works instead, with no privileges beyond normal USB permission:
 
-1. for every interface in the current configuration, issue
-   `USBDEVFS_IOCTL` + `USBDEVFS_DISCONNECT` (claim nothing)
+1. for every interface whose `bInterfaceClass == 0x01` (audio), issue
+   `USBDEVFS_IOCTL` + `USBDEVFS_DISCONNECT` (claim nothing). Non-audio
+   interfaces — HID remotes, vendor functions — are left alone.
 2. `USBDEVFS_SETCONFIGURATION` — now succeeds, and resets all alt settings
+   (`EBUSY` is tolerated: the switch is best-effort once the audio interfaces
+   are free)
 3. claim the AudioControl interface and the streaming interface at alt 0
 4. `USBDEVFS_SETINTERFACE` to the chosen alt setting
 5. `SET_CUR` sampling frequency on the endpoint
+
+Teardown never calls `SETCONFIGURATION` again: `usb_set_configuration()`
+re-registers every interface and invalidates the usbfs fd (`EBADF`), and the
+kernel refuses it while any interface is claimed. Instead the engine releases
+the interfaces it holds, resets the streaming alt to 0, then issues
+`USBDEVFS_IOCTL` + `USBDEVFS_CONNECT` for **every** interface in the
+configuration, so `snd-usb-audio`, the HID remote and the capture function all
+rebind without a replug.
 
 `USBDEVFS_DISCONNECT` via `USBDEVFS_IOCTL` needs no `CAP_SYS_ADMIN`, unlike
 `USBDEVFS_DISCONNECT_CLAIM`. Android's SELinux policy grants apps
@@ -129,8 +142,8 @@ Credit where due: this sequence is documented in
 and [unom-io/usbfs-iso](https://github.com/unom-io/usbfs-iso) (Apache-2.0).
 The implementation here is independent; no code was copied.
 
-Note: the sweep evicts *every* interface, including HID (inline remotes), and
-those are never re-bound by the app. Release the device when done.
+The sweep is audio-class-only, and the `CONNECT` teardown re-requests driver
+matching for every interface, so nothing stays orphaned after a session.
 
 ## Build
 
@@ -155,10 +168,11 @@ Android: open `android/` in Android Studio and build. Requires NDK and CMake.
   works, but routing the mixer path through the DAC needs `snd-usb-audio`
   bound; if it is not, audio goes to the speaker until the DAC is replugged.
   The exclusive/bit-perfect path is unaffected.
-- **16-bit mode is global.** Selecting 16-bit quantises everything (with
-  dither) instead of per-track alt selection; 24-bit remains the default.
-- **24-bit → 16-bit alt switching in place is not exercised** by normal
-  playback because the app requests one output depth at a time.
+- **Auto depth depends on metadata.** When neither the library scan nor
+  `MediaExtractor` reports a bit depth, the track falls back to 24-bit.
+- **24-bit → 16-bit alt switching in place** is implemented (gapless breaks
+  into `uae_switch_format`), verified in logs; a full on-device A/B of the
+  audible switch is still pending a DAC session.
 
 ## Next
 

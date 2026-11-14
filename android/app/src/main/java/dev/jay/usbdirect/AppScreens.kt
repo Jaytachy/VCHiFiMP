@@ -936,7 +936,8 @@ fun OutputScreen(
     player: UsbDirectPlayer?,
     hardwareVolume: Boolean,
     onHardwareVolume: (Boolean) -> Unit,
-    dynamicColors: Boolean = true
+    dynamicColors: Boolean = true,
+    mixerRouteMissing: Boolean = false
 ) {
     val transport = rememberTransport(transportFlow)
 
@@ -1007,6 +1008,16 @@ fun OutputScreen(
                     )
                 }
                 Switch(checked = exclusive, onCheckedChange = onExclusive)
+            }
+
+            if (mixerRouteMissing) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "DAC attached but not registered with Android audio yet — " +
+                    "mixer output may go to the phone speaker until it is.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
             }
 
             if (hwVol != null) {
@@ -1132,7 +1143,7 @@ fun SettingsScreen(
     onSleepMinutes: (Int) -> Unit,
     skipShort: Boolean,
     onSkipShort: (Boolean) -> Unit,
-    version: String = "1.0.0"
+    version: String = "1.0.1"
 ) {
     LazyColumn(
         Modifier.fillMaxSize().padding(horizontal = 20.dp),
@@ -1147,13 +1158,20 @@ fun SettingsScreen(
             SettingsSection("Audio engine") {
                 SettingTitle(
                     "Output bit depth",
-                    if (outputBits == 16) "16-bit alt setting, no truncation of 24-bit files"
-                    else "24-bit default · lossless zero-padding for 16-bit sources"
+                    when (outputBits) {
+                        16 -> "16-bit alt 1 for every track"
+                        24 -> "24-bit alt 2 for every track"
+                        else -> "Auto: 16-bit files use alt 1, 24-bit files use alt 2"
+                    }
                 )
                 OptionChips(
-                    options = listOf("24-bit (Default)", "16-bit"),
-                    selected = if (outputBits == 16) 1 else 0,
-                    onSelect = { onOutputBits(if (it == 0) 24 else 16) }
+                    options = listOf("Auto (Match Source)", "24-bit", "16-bit"),
+                    selected = when (outputBits) { 24 -> 1; 16 -> 2; else -> 0 },
+                    onSelect = {
+                        onOutputBits(
+                            when (it) { 1 -> 24; 2 -> 16; else -> 0 }
+                        )
+                    }
                 )
                 Spacer(Modifier.height(14.dp))
 

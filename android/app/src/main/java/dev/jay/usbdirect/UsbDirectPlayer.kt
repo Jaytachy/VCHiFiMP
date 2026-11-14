@@ -52,6 +52,10 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile var resamplerQuality: Int = NativeResampler.QUALITY_MEDIUM
     /** TPDF dither in the native packer. */
     @Volatile private var dither = true
+    /** 0 = match each track's source depth, 16/24 = fixed output depth. */
+    @Volatile private var autoBitDepth = true
+    @Volatile var fixedBits = 24
+    @Volatile private var currentOutBits = 24
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -74,6 +78,7 @@ class UsbDirectPlayer(private val context: Context) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
         lastReportedPosition = startMs
+        currentOutBits = bits
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
         onFormat?.invoke(dev, bits)
@@ -302,6 +307,20 @@ class UsbDirectPlayer(private val context: Context) {
     /** Audible position of the current track, from reaped URBs. */
     fun positionMs(): Long = lastReportedPosition
 
+    /** Output depth policy: auto (match source) or a fixed 16/24. */
+    fun setBitDepthPolicy(auto: Boolean, bits: Int) {
+        autoBitDepth = auto
+        fixedBits = bits
+    }
+
+    /** Depth this track will be packed at, used by the gapless look-ahead. */
+    fun outputBitsFor(t: Track): Int {
+        if (!autoBitDepth) return fixedBits
+        if (t.bitDepth == 16 || t.bitDepth == 24) return t.bitDepth
+        val probed = MediaProbe.of(context, t.uri)?.bitDepth ?: 0
+        return if (probed == 16 || probed == 24) probed else 24
+    }
+
     fun setDither(on: Boolean) {
         dither = on
         engine?.setDither(on)
@@ -411,6 +430,11 @@ class UsbDirectPlayer(private val context: Context) {
             val next = gaplessProvider?.invoke() ?: break
             val (nextIndex, nextTrack) = next
             if (srcRate != outRate || srcCh != s.channels()) break
+            val nextBits = outputBitsFor(nextTrack)
+            if (nextBits != currentOutBits) {
+                Log.i("VCProbe", "gapless: bit depth $currentOutBits -> $nextBits, normal switch")
+                break
+            }
             val nextRate = probeRate(nextTrack.uri)
             val nextCh = probeChannels(nextTrack.uri)
             if (nextRate != outRate || nextCh != srcCh) {

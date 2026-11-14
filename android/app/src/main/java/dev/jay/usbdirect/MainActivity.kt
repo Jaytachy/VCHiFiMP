@@ -10,6 +10,7 @@ import android.content.ServiceConnection
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -61,7 +62,7 @@ class MainActivity : ComponentActivity() {
     private var showQueue by mutableStateOf(false)
     private var themeMode by mutableStateOf(ThemeMode.DARK)
     private var dynamicColors by mutableStateOf(true)
-    private var outputBits by mutableStateOf(24)
+    private var outputBits by mutableStateOf(0)   // 0 = auto (match source)
     private var srcQuality by mutableStateOf(NativeResampler.QUALITY_MEDIUM)
     private var dither by mutableStateOf(true)
     private var gaplessOn by mutableStateOf(true)
@@ -92,7 +93,7 @@ class MainActivity : ComponentActivity() {
             // needed so Home's "continue listening" can start on a cold launch
             val dac = audioDevice()
             if (dac != null && usbManager.hasPermission(dac)) {
-                svc.setDevice(dac, 24, volume)
+                svc.setDevice(dac, outputBits, volume)
                 dacName = dac.productName ?: "USB DAC"
             } else if (dac != null) {
                 // DAC present but no grant yet (fresh install / replug): ask now
@@ -173,7 +174,7 @@ class MainActivity : ComponentActivity() {
                 val d = audioDevice()
                 if (d != null) {
                     if (usbManager.hasPermission(d)) {
-                        svc.setDevice(d, 24, volume)
+                        svc.setDevice(d, outputBits, volume)
                         svc.setQueue(listOf(t), 0)
                     } else {
                         requestUsb(d)
@@ -238,7 +239,7 @@ class MainActivity : ComponentActivity() {
             val p = pendingPlay
             if (p != null) {
                 pendingPlay = null
-                service?.setDevice(d, 24, volume)
+                service?.setDevice(d, outputBits, volume)
                 service?.setQueue(p.first, p.second)
             } else {
                 attachDac(d)
@@ -284,7 +285,7 @@ class MainActivity : ComponentActivity() {
             ThemeMode.valueOf(getPreferences(MODE_PRIVATE).getString("theme", "DARK")!!)
         }.getOrDefault(ThemeMode.DARK)
         dynamicColors = getPreferences(MODE_PRIVATE).getBoolean("dynColors", true)
-        outputBits = getPreferences(MODE_PRIVATE).getInt("outBits", 24)
+        outputBits = getPreferences(MODE_PRIVATE).getInt("outBits", 0)
         srcQuality = getPreferences(MODE_PRIVATE).getInt(
             "srcQuality", NativeResampler.QUALITY_MEDIUM
         )
@@ -322,6 +323,19 @@ class MainActivity : ComponentActivity() {
         }
 
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (intent?.getBooleanExtra("depthtest", false) == true) {
+                val dir = getExternalFilesDir(null)
+                val a = java.io.File(dir, "tone24.wav")
+                val b = java.io.File(dir, "tone16.wav")
+                if (a.exists() && b.exists()) {
+                    val ta = Track(Uri.fromFile(a), "depth 24", 8000, "test", "test", "WAV", 24)
+                    val tb = Track(Uri.fromFile(b), "depth 16", 8000, "test", "test", "WAV", 16)
+                    Log.i("VCProbe", "depth test: 24-bit -> 16-bit, svc=${service != null}")
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        service?.setQueue(listOf(ta, tb), 0)
+                    }, 1500)
+                }
+            }
             if (intent?.getBooleanExtra("skipnext", false) == true) service?.next()
             val sleepMin = intent?.getIntExtra("sleepmin", -1) ?: -1
             if (sleepMin >= 0) {
@@ -359,13 +373,20 @@ class MainActivity : ComponentActivity() {
         }, 1200)
 
         setContent {
-            VcTheme(
-                dark = when (themeMode) {
-                    ThemeMode.SYSTEM -> systemIsDark()
-                    ThemeMode.DARK -> true
-                    ThemeMode.LIGHT -> false
+            val darkNow = when (themeMode) {
+                ThemeMode.SYSTEM -> systemIsDark()
+                ThemeMode.DARK -> true
+                ThemeMode.LIGHT -> false
+            }
+            androidx.compose.runtime.SideEffect {
+                androidx.core.view.WindowCompat.getInsetsController(
+                    window, window.decorView
+                ).apply {
+                    isAppearanceLightStatusBars = !darkNow
+                    isAppearanceLightNavigationBars = !darkNow
                 }
-            ) {
+            }
+            VcTheme(dark = darkNow) {
                 Surface(Modifier.fillMaxSize()) {
                     val picker = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocumentTree()
@@ -575,6 +596,8 @@ class MainActivity : ComponentActivity() {
                                     player = service?.player,
                                     hardwareVolume = hardwareVolume,
                                     dynamicColors = dynamicColors,
+                                    mixerRouteMissing = !exclusive && dacName.isNotEmpty() &&
+                                        !hasUsbAudioRoute(),
                                     onHardwareVolume = {
                                         hardwareVolume = it
                                         service?.setHardwareVolume(it)
@@ -639,6 +662,7 @@ class MainActivity : ComponentActivity() {
                                         sleepMinutes = it
                                         service?.setSleepTimer(it)
                                     },
+                                    version = BuildConfig.VERSION_NAME,
                                     skipShort = skipShort,
                                     onSkipShort = {
                                         skipShort = it
@@ -728,7 +752,7 @@ class MainActivity : ComponentActivity() {
         if (d != null) {
             dacName = d.productName ?: "USB DAC"
             exclusive = true
-            service?.setDevice(d, 24, volume)
+            service?.setDevice(d, outputBits, volume)
             service?.setExclusive(true)
         } else {
             dacName = ""
@@ -745,7 +769,7 @@ class MainActivity : ComponentActivity() {
     private fun attachDac(d: UsbDevice) {
         dacName = d.productName ?: "USB DAC"
         exclusive = true
-        service?.setDevice(d, 24, volume)
+        service?.setDevice(d, outputBits, volume)
         service?.setExclusive(true)
         getPreferences(MODE_PRIVATE).edit().putBoolean("exclusive", true).apply()
         Log.i("VCProbe", "DAC attached: $dacName")
@@ -759,11 +783,20 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /** True when Android's audio stack currently exposes a USB output. */
+    private fun hasUsbAudioRoute(): Boolean {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any {
+            it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+            it.type == AudioDeviceInfo.TYPE_USB_DEVICE
+        }
+    }
+
     /** "primary:Music/Albums" -> "Albums"; keeps the settings row readable. */
     private fun folderLabelOf(tree: String): String {
-        val tail = Uri.decode(tree.substringAfterLast(':')).trimEnd('/')
-        val name = tail.substringAfterLast('/')
-        return name.ifEmpty { tail.ifEmpty { "Music" } }
+        val decoded = Uri.decode(tree).trimEnd('/')
+        val name = decoded.substringAfterLast(':').substringAfterLast('/')
+        return name.ifEmpty { "Music" }
     }
 
     private fun audioDevice(): UsbDevice? =
