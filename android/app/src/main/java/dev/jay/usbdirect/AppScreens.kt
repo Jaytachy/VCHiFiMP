@@ -20,6 +20,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +38,17 @@ enum class Tab(val label: String, val icon: ImageVector) {
     MUSIC("Music", Icons.Default.List),
     OUTPUT("Output", Icons.Default.PlayArrow),
     SETTINGS("Settings", Icons.Default.Settings)
+}
+
+/**
+ * Reading playback state only where it is displayed. Collecting it at the top
+ * of the tree recomposed the album grid four times a second, which is exactly
+ * the kind of thing that makes a scroll feel heavy.
+ */
+@Composable
+fun rememberTransport(flow: StateFlow<TransportState>?): TransportState {
+    val f = remember(flow) { flow ?: flowOf(TransportState()) }
+    return f.collectAsState(TransportState()).value
 }
 
 fun fmtTime(ms: Long): String {
@@ -90,7 +103,7 @@ fun BottomNav(selected: Tab, onSelect: (Tab) -> Unit, modifier: Modifier = Modif
 
 @Composable
 fun MiniPlayer(
-    transport: TransportState,
+    transportFlow: StateFlow<TransportState>?,
     volume: Float,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
@@ -99,6 +112,7 @@ fun MiniPlayer(
     onVolume: (Float) -> Unit,
     onExpand: () -> Unit = {}
 ) {
+    val transport = rememberTransport(transportFlow)
     if (transport.title.isEmpty()) return
 
     var dragging by remember { mutableStateOf(false) }
@@ -155,7 +169,7 @@ fun MiniPlayer(
 
 @Composable
 fun HomeScreen(
-    transport: TransportState,
+    transportFlow: StateFlow<TransportState>?,
     trackCount: Int,
     albumCount: Int,
     dacName: String,
@@ -163,6 +177,7 @@ fun HomeScreen(
     onPlayPause: () -> Unit,
     onResumeLast: () -> Unit
 ) {
+    val transport = rememberTransport(transportFlow)
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
             Spacer(Modifier.height(28.dp))
@@ -258,11 +273,12 @@ fun MusicScreen(
 @Composable
 private fun AlbumCard(album: LibAlbum, artVersion: Int, onClick: () -> Unit) {
     val ctx = LocalContext.current
-    val art = remember(album.name, album.artist, artVersion) {
-        ArtStore.existing(ctx, album.name, album.artist)
+    val key = album.name + "\u0000" + album.artist
+    var bitmap by remember(key, artVersion) {
+        mutableStateOf(ArtCache.peek(album.name, album.artist))
     }
-    val bitmap = remember(art) {
-        art?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
+    LaunchedEffect(key, artVersion) {
+        if (bitmap == null) bitmap = ArtCache.load(ctx, album.name, album.artist)
     }
     val bits = album.tracks.firstOrNull()?.bitDepth ?: 0
 
@@ -274,9 +290,10 @@ private fun AlbumCard(album: LibAlbum, artVersion: Int, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(14.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
         ) {
-            if (bitmap != null) {
+            val bmp = bitmap
+            if (bmp != null) {
                 Image(
-                    bitmap = bitmap, contentDescription = album.name,
+                    bitmap = bmp, contentDescription = album.name,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
@@ -330,13 +347,14 @@ private fun AlbumCard(album: LibAlbum, artVersion: Int, onClick: () -> Unit) {
 @Composable
 fun OutputScreen(
     analyzer: AudioAnalyzer?,
-    transport: TransportState,
+    transportFlow: StateFlow<TransportState>?,
     dacName: String,
     exclusive: Boolean,
     onExclusive: (Boolean) -> Unit,
     volume: Float,
     onVolume: (Float) -> Unit
 ) {
+    val transport = rememberTransport(transportFlow)
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
         item {
             Spacer(Modifier.height(24.dp))

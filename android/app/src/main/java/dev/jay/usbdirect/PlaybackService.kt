@@ -53,6 +53,8 @@ class PlaybackService : Service() {
 
     private val binder = LocalBinder()
     private val _state = MutableStateFlow(TransportState())
+    private val _queueFlow = MutableStateFlow<List<Track>>(emptyList())
+    val queueFlow: StateFlow<List<Track>> = _queueFlow.asStateFlow()
     val state: StateFlow<TransportState> = _state.asStateFlow()
 
     lateinit var player: UsbDirectPlayer
@@ -133,6 +135,7 @@ class PlaybackService : Service() {
     fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
         queue.clear()
         queue.addAll(tracks)
+        _queueFlow.value = queue.toList()
         _state.value = _state.value.copy(queueSize = queue.size)
         if (startIndex in queue.indices) playAt(startIndex)
     }

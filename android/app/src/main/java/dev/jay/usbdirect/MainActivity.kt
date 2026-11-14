@@ -38,7 +38,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
 
     private var service: PlaybackService? by mutableStateOf(null)
-    private var transport by mutableStateOf(TransportState())
     private var tracks by mutableStateOf<List<LibTrack>>(emptyList())
     private var albums by mutableStateOf<List<LibAlbum>>(emptyList())
     private var scanState by mutableStateOf("")
@@ -51,6 +50,8 @@ class MainActivity : ComponentActivity() {
     private var folderLabel by mutableStateOf("")
     private var artVersion by mutableStateOf(0)
     private var showNowPlaying by mutableStateOf(false)
+    private var showQueue by mutableStateOf(false)
+    private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
     private var pendingAlbum: Pair<LibAlbum, Int>? = null
     private var pendingDebug: Track? = null
@@ -63,7 +64,7 @@ class MainActivity : ComponentActivity() {
             service = svc
             svc.setVolume(volume)
             svc.setExclusive(exclusive)
-            lifecycleScope.launch { svc.state.collect { transport = it } }
+            lifecycleScope.launch { svc.queueFlow.collect { queueTracks = it } }
 
             intent?.getStringExtra("debugfile")?.let { path ->
                 val f = java.io.File(path)
@@ -158,17 +159,30 @@ class MainActivity : ComponentActivity() {
 
                     val album = openAlbum
                     if (album != null) BackHandler { openAlbum = null }
+                    if (showQueue) BackHandler { showQueue = false }
                     if (showNowPlaying) BackHandler { showNowPlaying = false }
+                    if (showQueue) {
+                        QueueScreen(
+                            tracks = queueTracks,
+                            transportFlow = service?.state,
+                            onPick = { service?.playAt(it) },
+                            onClose = { showQueue = false }
+                        )
+                        return@Surface
+                    }
                     if (showNowPlaying) {
                         NowPlayingScreen(
-                            transport = transport,
+                            transportFlow = service?.state,
                             art = ArtStore.existing(
-                                this@MainActivity, transport.album, transport.artist
+                                this@MainActivity,
+                                service?.state?.value?.album ?: "",
+                                service?.state?.value?.artist ?: ""
                             ),
                             volume = volume,
                             onClose = { showNowPlaying = false },
                             onPlayPause = {
-                                if (transport.playing) service?.pause() else service?.resume()
+                                if (service?.state?.value?.playing == true) service?.pause()
+                                else service?.resume()
                             },
                             onPrev = { service?.previous() },
                             onNext = { service?.next() },
@@ -178,7 +192,8 @@ class MainActivity : ComponentActivity() {
                                 service?.setVolume(it)
                                 getPreferences(MODE_PRIVATE).edit()
                                     .putFloat("volume", it).apply()
-                            }
+                            },
+                            onQueue = { showQueue = true }
                         )
                         return@Surface
                     }
@@ -187,10 +202,10 @@ class MainActivity : ComponentActivity() {
                         bottomBar = {
                             Column(Modifier.navigationBarsPadding()) {
                                 MiniPlayer(
-                                    transport = transport,
+                                    transportFlow = service?.state,
                                     volume = volume,
                                     onPlayPause = {
-                                        if (transport.playing) service?.pause()
+                                        if (service?.state?.value?.playing == true) service?.pause()
                                         else service?.resume()
                                     },
                                     onPrev = { service?.previous() },
@@ -213,13 +228,13 @@ class MainActivity : ComponentActivity() {
                                 AlbumScreen(album) { openAlbum = null }
                             } else when (tab) {
                                 Tab.HOME -> HomeScreen(
-                                    transport = transport,
+                                    transportFlow = service?.state,
                                     trackCount = tracks.size,
                                     albumCount = albums.size,
                                     dacName = dacName,
                                     onShuffleAll = { shuffleAll() },
                                     onPlayPause = {
-                                        if (transport.playing) service?.pause()
+                                        if (service?.state?.value?.playing == true) service?.pause()
                                         else service?.resume()
                                     },
                                     onResumeLast = { service?.resume() }
@@ -238,7 +253,7 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Tab.OUTPUT -> OutputScreen(
                                     analyzer = service?.player?.analyzer,
-                                    transport = transport,
+                                    transportFlow = service?.state,
                                     dacName = dacName,
                                     exclusive = exclusive,
                                     onExclusive = {

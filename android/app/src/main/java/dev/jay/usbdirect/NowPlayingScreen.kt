@@ -32,7 +32,7 @@ import java.io.File
  */
 @Composable
 fun NowPlayingScreen(
-    transport: TransportState,
+    transportFlow: kotlinx.coroutines.flow.StateFlow<TransportState>?,
     art: File?,
     volume: Float,
     onClose: () -> Unit,
@@ -40,8 +40,10 @@ fun NowPlayingScreen(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
-    onVolume: (Float) -> Unit
+    onVolume: (Float) -> Unit,
+    onQueue: () -> Unit = {}
 ) {
+    val transport = rememberTransport(transportFlow)
     val bitmap = remember(art) {
         art?.let { BitmapFactory.decodeFile(it.absolutePath)?.asImageBitmap() }
     }
@@ -87,7 +89,7 @@ fun NowPlayingScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = { /* queue comes later */ }) {
+                IconButton(onClick = onQueue) {
                     Icon(Icons.Default.List, contentDescription = "Queue",
                          tint = Color(0xCCFFFFFF))
                 }
