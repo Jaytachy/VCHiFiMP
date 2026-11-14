@@ -194,7 +194,11 @@ class MainActivity : ComponentActivity() {
                             showQueue = showQueue,
                             queueTracks = queueTracks,
                             onToggleQueue = { showQueue = !showQueue },
-                            onPickQueue = { service?.playAt(it) }
+                            onPickQueue = { service?.playAt(it) },
+                            onToggleShuffle = {
+                                service?.setShuffle(service?.state?.value?.shuffle != true)
+                            },
+                            onCycleRepeat = { service?.cycleRepeat() }
                         )
                         return@Surface
                     }

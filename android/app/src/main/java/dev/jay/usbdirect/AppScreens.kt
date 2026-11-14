@@ -15,12 +15,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import androidx.compose.ui.Alignment
@@ -254,6 +257,7 @@ fun MusicScreen(
     var grid by remember { mutableStateOf(true) }
     var sort by remember { mutableStateOf(SortBy.TITLE) }
     var artistFilter by remember { mutableStateOf<String?>(null) }
+    var query by rememberSaveable { mutableStateOf("") }
 
     val sortedTracks = remember(tracks, sort) {
         when (sort) {
@@ -288,6 +292,23 @@ fun MusicScreen(
         }
     }
 
+    val q = query.trim().lowercase()
+    val shownTracks = remember(sortedTracks, q) {
+        if (q.isEmpty()) sortedTracks else sortedTracks.filter {
+            it.title.lowercase().contains(q) ||
+            it.artist.lowercase().contains(q) ||
+            it.album.lowercase().contains(q)
+        }
+    }
+    val shownAlbums = remember(sortedAlbums, q) {
+        if (q.isEmpty()) sortedAlbums else sortedAlbums.filter {
+            it.name.lowercase().contains(q) || it.artist.lowercase().contains(q)
+        }
+    }
+    val shownArtists = remember(sortedArtists, q) {
+        if (q.isEmpty()) sortedArtists else sortedArtists.filter { it.first.lowercase().contains(q) }
+    }
+
     // artist drill-down
     val af = artistFilter
     if (af != null) {
@@ -313,7 +334,25 @@ fun MusicScreen(
             Text(scanState, style = MaterialTheme.typography.bodySmall,
                  color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search songs, albums, artists") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(8.dp))
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 LibSection.entries.forEachIndexed { i, sec ->
                     SegmentedButton(
@@ -351,16 +390,16 @@ fun MusicScreen(
 
         when (section) {
             LibSection.SONGS -> if (grid) {
-                SongGrid(sortedTracks, artVersion, onPlayList)
+                SongGrid(shownTracks, artVersion, onPlayList)
             } else {
-                SongList(sortedTracks, artVersion, onPlayList)
+                SongList(shownTracks, artVersion, onPlayList)
             }
             LibSection.ALBUMS -> if (grid) {
-                AlbumGrid(sortedAlbums, artVersion, albums.size, onOpenAlbum)
+                AlbumGrid(shownAlbums, artVersion, albums.size, onOpenAlbum)
             } else {
-                AlbumList(sortedAlbums, artVersion, onOpenAlbum)
+                AlbumList(shownAlbums, artVersion, onOpenAlbum)
             }
-            LibSection.ARTISTS -> ArtistList(sortedArtists) { artistFilter = it }
+            LibSection.ARTISTS -> ArtistList(shownArtists) { artistFilter = it }
         }
     }
 }

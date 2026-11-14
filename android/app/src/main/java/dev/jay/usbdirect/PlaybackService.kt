@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+enum class RepeatMode { OFF, ALL, ONE }
+
 data class Track(
     val uri: Uri,
     val title: String,
@@ -39,6 +41,8 @@ data class TransportState(
     val album: String = "",
     val codec: String = "",
     val queueSize: Int = 0,
+    val shuffle: Boolean = false,
+    val repeat: RepeatMode = RepeatMode.OFF,
     val error: String? = null
 )
 
@@ -63,6 +67,9 @@ class PlaybackService : Service() {
     private lateinit var session: MediaSession
 
     private val queue = mutableListOf<Track>()
+    private val originalQueue = mutableListOf<Track>()
+    private var shuffleEnabled = false
+    private var repeatMode = RepeatMode.OFF
     private var index = -1
     private var device: UsbDevice? = null
     private var pausedAtMs = 0L
@@ -133,11 +140,66 @@ class PlaybackService : Service() {
     }
 
     fun setQueue(tracks: List<Track>, startIndex: Int = 0) {
+        originalQueue.clear()
+        originalQueue.addAll(tracks)
+        val start = tracks.getOrNull(startIndex) ?: return
+
         queue.clear()
-        queue.addAll(tracks)
+        if (shuffleEnabled) {
+            // keep what the user chose at the head, shuffle the rest
+            queue.add(start)
+            queue.addAll(tracks.filterIndexed { i, _ -> i != startIndex }.shuffled())
+            _queueFlow.value = queue.toList()
+            _state.value = _state.value.copy(queueSize = queue.size)
+            playAt(0)
+        } else {
+            queue.addAll(tracks)
+            _queueFlow.value = queue.toList()
+            _state.value = _state.value.copy(queueSize = queue.size)
+            playAt(startIndex)
+        }
+    }
+
+    /** Shuffling rewrites the active order; the original is kept for turning it off. */
+    fun setShuffle(on: Boolean) {
+        if (on == shuffleEnabled) return
+        shuffleEnabled = on
+        val current = queue.getOrNull(index)
+
+        if (on) {
+            if (current != null) {
+                val rest = queue.filterIndexed { i, _ -> i != index }.shuffled()
+                queue.clear()
+                queue.add(current)
+                queue.addAll(rest)
+                index = 0
+            }
+        } else {
+            queue.clear()
+            queue.addAll(originalQueue)
+            if (current != null) {
+                val ni = queue.indexOfFirst { it.uri == current.uri }
+                if (ni >= 0) index = ni
+            }
+        }
+
         _queueFlow.value = queue.toList()
-        _state.value = _state.value.copy(queueSize = queue.size)
-        if (startIndex in queue.indices) playAt(startIndex)
+        _state.value = _state.value.copy(shuffle = on, index = index)
+    }
+
+    fun setRepeat(mode: RepeatMode) {
+        repeatMode = mode
+        _state.value = _state.value.copy(repeat = mode)
+    }
+
+    fun cycleRepeat() {
+        setRepeat(
+            when (repeatMode) {
+                RepeatMode.OFF -> RepeatMode.ALL
+                RepeatMode.ALL -> RepeatMode.ONE
+                RepeatMode.ONE -> RepeatMode.OFF
+            }
+        )
     }
 
     fun playAt(i: Int, fromMs: Long = 0L) {
@@ -185,18 +247,31 @@ class PlaybackService : Service() {
     }
 
     fun next() {
-        if (index + 1 < queue.size) playAt(index + 1)
-        else stop()
+        if (queue.isEmpty()) return
+        when {
+            index + 1 < queue.size -> playAt(index + 1)
+            repeatMode == RepeatMode.ALL -> playAt(0)
+            else -> stop()
+        }
     }
 
     fun previous() {
-        if (_state.value.positionMs > 3000) playAt(index, 0L)
-        else if (index > 0) playAt(index - 1)
-        else playAt(index, 0L)
+        if (queue.isEmpty()) return
+        when {
+            _state.value.positionMs > 3000 -> playAt(index, 0L)
+            index > 0 -> playAt(index - 1)
+            repeatMode == RepeatMode.ALL -> playAt(queue.lastIndex)
+            else -> playAt(index, 0L)
+        }
     }
 
+    /** Natural end of a track: the only place Repeat.ONE differs from a skip. */
     private fun advanceOrStop() {
-        if (index + 1 < queue.size) playAt(index + 1) else stop()
+        when (repeatMode) {
+            RepeatMode.ONE -> playAt(index, 0L)
+            RepeatMode.ALL -> playAt(if (index + 1 < queue.size) index + 1 else 0)
+            RepeatMode.OFF -> if (index + 1 < queue.size) playAt(index + 1) else stop()
+        }
     }
 
     fun stop() {

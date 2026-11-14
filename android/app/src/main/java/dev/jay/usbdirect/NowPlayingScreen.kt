@@ -10,6 +10,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Shuffle
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -45,7 +52,9 @@ fun NowPlayingScreen(
     onSeek: (Long) -> Unit,
     onVolume: (Float) -> Unit,
     onToggleQueue: () -> Unit,
-    onPickQueue: (Int) -> Unit
+    onPickQueue: (Int) -> Unit,
+    onToggleShuffle: () -> Unit = {},
+    onCycleRepeat: () -> Unit = {}
 ) {
     val transport = rememberTransport(transportFlow)
     val bitmap = remember(art) {
@@ -188,8 +197,18 @@ fun NowPlayingScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    TextButton(onClick = onPrev) {
-                        Text("|◀", style = MaterialTheme.typography.headlineSmall)
+                    IconButton(onClick = onToggleShuffle) {
+                        Icon(
+                            Icons.Rounded.Shuffle, contentDescription = "Shuffle",
+                            tint = if (transport.shuffle) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = onPrev) {
+                        Icon(
+                            Icons.Rounded.SkipPrevious, contentDescription = "Previous",
+                            modifier = Modifier.size(36.dp)
+                        )
                     }
                     Surface(
                         shape = CircleShape,
@@ -197,15 +216,30 @@ fun NowPlayingScreen(
                         modifier = Modifier.size(74.dp).clickable { onPlayPause() }
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                if (transport.playing) "❚❚" else "▶",
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = MaterialTheme.colorScheme.onPrimary
+                            Icon(
+                                if (transport.playing) Icons.Rounded.Pause
+                                else Icons.Rounded.PlayArrow,
+                                contentDescription = if (transport.playing) "Pause" else "Play",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(36.dp)
                             )
                         }
                     }
-                    TextButton(onClick = onNext) {
-                        Text("▶|", style = MaterialTheme.typography.headlineSmall)
+                    IconButton(onClick = onNext) {
+                        Icon(
+                            Icons.Rounded.SkipNext, contentDescription = "Next",
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                    IconButton(onClick = onCycleRepeat) {
+                        Icon(
+                            if (transport.repeat == RepeatMode.ONE) Icons.Rounded.RepeatOne
+                            else Icons.Rounded.Repeat,
+                            contentDescription = "Repeat",
+                            tint = if (transport.repeat == RepeatMode.OFF)
+                                       MaterialTheme.colorScheme.onSurfaceVariant
+                                   else MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
 
