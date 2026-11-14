@@ -253,7 +253,11 @@ fun HomeScreen(
     onPlayPause: () -> Unit,
     onShuffleAll: () -> Unit,
     onPlayTracks: (List<LibTrack>) -> Unit,
-    onOpenAlbum: (LibAlbum) -> Unit
+    onOpenAlbum: (LibAlbum) -> Unit,
+    dspEnabled: Boolean = false,
+    ditherOn: Boolean = true,
+    hardwareVolume: Boolean = false,
+    volume: Float = 1f
 ) {
     val transport = rememberTransport(transportFlow)
     val showingNow = transport.title.isNotEmpty()
@@ -262,7 +266,12 @@ fun HomeScreen(
         if (dacName.isNotEmpty()) {
             if (rateLabel.isNotEmpty()) "$dacName \u2022 $rateLabel" else dacName
         } else "Phone audio"
-    val bitPerfect = exclusive && transport.playing && transport.format.isNotEmpty()
+    val verdict = signalVerdict(
+        exclusive, dspEnabled, ditherOn, transport.resampled,
+        hardwareVolume, volume
+    )
+    val bitPerfect = transport.playing && transport.format.isNotEmpty() && verdict.perfect
+    val processed = transport.playing && transport.format.isNotEmpty() && !verdict.perfect
 
     val recentlyAdded = remember(albums) {
         albums.sortedByDescending { a -> a.tracks.maxOfOrNull { it.modifiedMs } ?: 0L }
@@ -293,7 +302,7 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    OutputPill(outputLabel, bitPerfect, onOutput)
+                    OutputPill(outputLabel, bitPerfect, onOutput, processed = processed)
                 }
                 Spacer(Modifier.height(18.dp))
             }
@@ -852,7 +861,12 @@ fun MusicScreen(
                     TextButton(onClick = { menu = true }) {
                         Text("Sort: ${sort.label}")
                     }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenu(
+                        expanded = menu,
+                        onDismissRequest = { menu = false },
+                        modifier = Modifier
+                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    ) {
                         SortBy.entries.forEach { sb ->
                             DropdownMenuItem(
                                 text = { Text(sb.label) },
@@ -1255,6 +1269,10 @@ private fun syncName(s: Long) = when (s) {
     1L -> "async"; 2L -> "adaptive"; 3L -> "sync"; else -> "none"
 }
 
+private fun fmtRate(r: Int): String =
+    if (r <= 0) "—" else if (r % 1000 == 0) "${r / 1000} kHz"
+    else "%.1f kHz".format(r / 1000.0)
+
 @Composable
 fun OutputScreen(
     analyzer: AudioAnalyzer?,
@@ -1268,7 +1286,13 @@ fun OutputScreen(
     hardwareVolume: Boolean,
     onHardwareVolume: (Boolean) -> Unit,
     dynamicColors: Boolean = true,
-    mixerRouteMissing: Boolean = false
+    mixerRouteMissing: Boolean = false,
+    dspEnabled: Boolean = false,
+    dspConfig: DspConfig = DspConfig(),
+    dspPresetName: String = "Flat",
+    ditherOn: Boolean = true,
+    onDspEnabled: (Boolean) -> Unit = {},
+    onOpenEq: () -> Unit = {}
 ) {
     val transport = rememberTransport(transportFlow)
 
@@ -1294,6 +1318,14 @@ fun OutputScreen(
             Text("Output", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(12.dp))
 
+            val streamActive = transport.format.isNotEmpty()
+            val verdict = signalVerdict(
+                exclusive, dspEnabled, ditherOn, transport.resampled,
+                hardwareVolume, volume
+            )
+            val perfect = streamActive && verdict.perfect
+            val processed = streamActive && !verdict.perfect
+
             Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1302,17 +1334,24 @@ fun OutputScreen(
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.weight(1f)
                         )
-                        val perfect = exclusive && tel != null &&
-                                transport.format.isNotEmpty()
+                        val amber = Color(0xFFFFD27A)
                         Surface(
                             shape = RoundedCornerShape(8.dp),
-                            color = if (perfect) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant
+                            color = when {
+                                perfect -> MaterialTheme.colorScheme.primaryContainer
+                                processed -> Color(0xFF4A3410)
+                                else -> MaterialTheme.colorScheme.surfaceVariant
+                            }
                         ) {
                             Text(
-                                if (perfect) "BIT-PERFECT" else
-                                    if (exclusive) "IDLE" else "MIXER",
+                                when {
+                                    perfect -> "BIT-PERFECT"
+                                    processed -> "PROCESSED"
+                                    exclusive -> "IDLE"
+                                    else -> "MIXER"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
+                                color = if (processed) amber else Color.Unspecified,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
@@ -1324,6 +1363,14 @@ fun OutputScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (processed) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            verdict.reasons.joinToString(" · "),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFFD27A)
+                        )
+                    }
                 }
             }
 
@@ -1370,18 +1417,55 @@ fun OutputScreen(
             }
 
             // Keep the slider in its own band so the switch above can never be
-            // hit by a slider drag, and vice versa.
-            Spacer(Modifier.height(14.dp))
+            // hit by a slider drag, and vice versa. No fixed height here:
+            // clipping the M3 slider also clipped its thumb and hitbox.
+            HorizontalDivider(Modifier.padding(top = 14.dp))
             Row(
-                Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                Modifier.fillMaxWidth().heightIn(min = 64.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("vol", style = MaterialTheme.typography.labelMedium)
                 Slider(
                     value = volume, onValueChange = onVolume,
-                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp).height(40.dp)
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
                 )
                 Text("${(volume * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Equalizer", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "$dspPresetName · " + if (dspEnabled) {
+                                    "${dspConfig.bands.count { it.enabled }} bands"
+                                } else "bit-perfect bypass",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = dspEnabled, onCheckedChange = onDspEnabled)
+                        Spacer(Modifier.width(6.dp))
+                        TextButton(onClick = onOpenEq) { Text("Open") }
+                    }
+                    val curveRate = (tel?.rate?.toInt() ?: transport.deviceRate)
+                        .takeIf { it > 0 } ?: 48000
+                    MiniEqCurve(
+                        config = dspConfig,
+                        rate = curveRate,
+                        modifier = Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 4.dp)
+                    )
+                    if (!exclusive) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "EQ applies to USB DAC output only",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                }
             }
 
             Spacer(Modifier.height(18.dp))
@@ -1400,6 +1484,37 @@ fun OutputScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     } else {
+                        val src = listOfNotNull(
+                            transport.codec.ifEmpty { null },
+                            transport.sourceRate.takeIf { it > 0 }?.let(::fmtRate),
+                            transport.sourceBits.takeIf { it > 0 }?.let { "$it-bit" }
+                        ).joinToString(" · ").ifEmpty { "—" }
+                        Metric("Source", src)
+                        Metric("DAC", "${fmtRate(t.rate.toInt())} · ${t.bits}-bit · alt ${t.alt}")
+                        Metric("Resample", if (transport.resampled) "yes" else "no")
+                        Metric(
+                            "DSP",
+                            if (dspEnabled) "on · ${dspConfig.bands.count { it.enabled }} bands"
+                            else "off · bypass"
+                        )
+                        Metric(
+                            "Volume",
+                            if (hardwareVolume && hwVol != null)
+                                "HW %.1f dB".format(hwVol!![3] / 256.0)
+                            else "SW ${(volume * 100).toInt()}%"
+                        )
+                        val hr = DspMath.maxBoostDb(
+                            dspConfig,
+                            t.rate.takeIf { it > 0 }?.toDouble() ?: 48000.0
+                        )
+                        Metric(
+                            "Headroom",
+                            when {
+                                !dspEnabled -> "bypass"
+                                dspConfig.autoHeadroom -> "auto −%.1f dB".format(hr)
+                                else -> "manual"
+                            }
+                        )
                         Metric("Format", "${t.rate / 1000} kHz · ${t.bits}-bit · alt ${t.alt}" +
                                 " · ${syncName(t.sync)}")
                         Metric("In flight", "${t.inflightMs} ms")
@@ -1756,17 +1871,28 @@ private fun OptionChips(
     onSelect: (Int) -> Unit
 ) {
     Spacer(Modifier.height(8.dp))
-    Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        options.forEachIndexed { i, label ->
-            FilterChip(
-                selected = i == selected,
-                onClick = { onSelect(i) },
-                label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            )
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            options.forEachIndexed { i, label ->
+                FilterChip(
+                    selected = i == selected,
+                    onClick = { onSelect(i) },
+                    label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
+            Spacer(Modifier.width(22.dp))
         }
+        // Fade tells the user the row scrolls instead of visually clipping "60".
+        Box(
+            Modifier.align(Alignment.CenterEnd).width(26.dp).fillMaxHeight().background(
+                Brush.horizontalGradient(
+                    listOf(Color.Transparent, MaterialTheme.colorScheme.surfaceContainer)
+                )
+            )
+        )
     }
 }
 

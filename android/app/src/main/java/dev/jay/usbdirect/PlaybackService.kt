@@ -48,7 +48,9 @@ data class Track(
     val album: String = "",
     val codec: String = "",
     /** Source bit depth when known; 0 means "probe at play time". */
-    val bitDepth: Int = 0
+    val bitDepth: Int = 0,
+    /** Source sample rate when known; 0 means "probe at play time". */
+    val sampleRate: Int = 0
 )
 
 data class TransportState(
@@ -66,7 +68,14 @@ data class TransportState(
     val shuffle: Boolean = false,
     val repeat: RepeatMode = RepeatMode.OFF,
     val missingUri: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /** Source stream metadata, for the signal-path card. */
+    val sourceRate: Int = 0,
+    val sourceBits: Int = 0,
+    /** Output rate/depth actually handed to the DAC. */
+    val deviceRate: Int = 0,
+    val deviceBits: Int = 0,
+    val resampled: Boolean = false
 )
 
 /**
@@ -151,9 +160,13 @@ class PlaybackService : Service() {
             }
             onFormat = { rate, bits ->
                 val c = _state.value.codec
+                val src = _state.value.sourceRate
                 _state.value = _state.value.copy(
                     format = (if (c.isNotEmpty()) "$c · " else "") +
-                             "$bits-bit · ${rate / 1000} kHz"
+                             "$bits-bit · ${rate / 1000} kHz",
+                    deviceRate = rate,
+                    deviceBits = bits,
+                    resampled = src > 0 && src != rate
                 )
             }
             onFinished = {
@@ -398,11 +411,16 @@ class PlaybackService : Service() {
         pausedAtMs = fromMs
         lastPosPersistMs = fromMs
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
+        val probe = if (t.sampleRate <= 0 || t.bitDepth <= 0)
+            MediaProbe.of(this, t.uri) else null
+        val srcRate = t.sampleRate.takeIf { it > 0 } ?: probe?.sampleRate ?: 0
+        val srcBits = t.bitDepth.takeIf { it > 0 } ?: probe?.bitDepth ?: 0
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
             positionMs = fromMs, durationMs = t.durationMs, error = null,
             artist = t.artist, album = t.album, codec = codec, format = "",
-            missingUri = null
+            missingUri = null, sourceRate = srcRate, sourceBits = srcBits,
+            deviceRate = 0, deviceBits = outBits, resampled = false
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
                                    t.durationMs, codec, fromMs))
@@ -653,9 +671,14 @@ class PlaybackService : Service() {
         pausedAtMs = 0
         lastPosPersistMs = 0
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
+        val srcRate = t.sampleRate.takeIf { it > 0 } ?: _state.value.sourceRate
+        val srcBits = t.bitDepth.takeIf { it > 0 } ?: _state.value.sourceBits
         _state.value = _state.value.copy(
             index = idx, title = t.title, artist = t.artist, album = t.album,
-            codec = codec, positionMs = 0, durationMs = t.durationMs, missingUri = null
+            codec = codec, positionMs = 0, durationMs = t.durationMs,
+            missingUri = null, sourceRate = srcRate, sourceBits = srcBits,
+            resampled = srcRate > 0 && _state.value.deviceRate > 0 &&
+                        srcRate != _state.value.deviceRate
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
                                    t.durationMs, codec))

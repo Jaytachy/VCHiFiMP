@@ -20,7 +20,7 @@ data class LibTrack(
     val modifiedMs: Long = 0L
 ) {
     fun toQueueTrack() =
-        Track(uri, title, durationMs, artist, album, codec, bitDepth)
+        Track(uri, title, durationMs, artist, album, codec, bitDepth, sampleRate)
 }
 
 data class LibAlbum(

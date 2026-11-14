@@ -64,9 +64,17 @@ fun NowPlayingScreen(
     onCycleRepeat: () -> Unit = {},
     isFavorite: Boolean = false,
     onToggleFavorite: () -> Unit = {},
-    dynamicColors: Boolean = true
+    dynamicColors: Boolean = true,
+    exclusive: Boolean = true,
+    dspEnabled: Boolean = false,
+    ditherOn: Boolean = true,
+    hardwareVolume: Boolean = false
 ) {
     val transport = rememberTransport(transportFlow)
+    val verdict = signalVerdict(
+        exclusive, dspEnabled, ditherOn, transport.resampled,
+        hardwareVolume, volume
+    )
 
     // Artwork must follow the *current* track. Resolving it outside this
     // composable from service.state.value gave a one-shot snapshot, so skipping
@@ -283,6 +291,25 @@ fun NowPlayingScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = if (verdict.perfect)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else Color(0xFF4A3410)
+                        ) {
+                            Text(
+                                if (verdict.perfect) "Bit-perfect"
+                                else "PROCESSED · " + verdict.reasons.joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (verdict.perfect)
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                else Color(0xFFFFD27A),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.weight(0.10f))

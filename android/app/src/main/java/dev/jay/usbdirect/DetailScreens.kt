@@ -225,10 +225,16 @@ fun FavoritesScreen(
 /* ------------------------------------------------------ output pill */
 
 @Composable
-fun OutputPill(label: String, bitPerfect: Boolean, onClick: () -> Unit) {
+fun OutputPill(
+    label: String,
+    bitPerfect: Boolean,
+    onClick: () -> Unit,
+    processed: Boolean = false
+) {
     Surface(
         shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = if (processed) androidx.compose.ui.graphics.Color(0xFF4A3410)
+                else MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier.clickable { onClick() }
     ) {
         Row(
@@ -239,6 +245,7 @@ fun OutputPill(label: String, bitPerfect: Boolean, onClick: () -> Unit) {
                 Modifier.size(8.dp).clip(CircleShape).background(
                     when {
                         bitPerfect -> androidx.compose.ui.graphics.Color(0xFF31C48D)
+                        processed -> androidx.compose.ui.graphics.Color(0xFFFFD27A)
                         label.startsWith("Phone") -> MaterialTheme.colorScheme.onSurfaceVariant
                         else -> MaterialTheme.colorScheme.primary
                     }

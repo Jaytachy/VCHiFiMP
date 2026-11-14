@@ -35,6 +35,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -86,6 +88,14 @@ class MainActivity : ComponentActivity() {
     private var playingNow by mutableStateOf(false)
     private var queueTracks by mutableStateOf<List<Track>>(emptyList())
 
+    private var showEq by mutableStateOf(false)
+    private var dspEnabled by mutableStateOf(false)
+    private var dspConfig by mutableStateOf(DspConfig())
+    private var dspPresetName by mutableStateOf("Flat")
+    private var dspUserPresets by mutableStateOf<List<EqPreset>>(emptyList())
+    private var eqImportMessage by mutableStateOf<String?>(null)
+    private var dspPushJob: Job? = null
+
     private var pendingPlay: Pair<List<Track>, Int>? = null
     private var pendingDebug: Track? = null
     private val cancelScan = AtomicBoolean(false)
@@ -105,6 +115,8 @@ class MainActivity : ComponentActivity() {
             svc.setGapless(gaplessOn)
             svc.setAutoReclaim(autoReclaim)
             svc.setSmartAutoplay(smartAutoplay)
+            svc.player.setDspConfig(dspConfig)
+            svc.player.setDspEnabled(dspEnabled)
             svc.queueRefillProvider = {
                 val existing = svc.queueFlow.value.map { it.uri }.toSet()
                 allTracks.filter { it.uri !in existing }
@@ -326,6 +338,20 @@ class MainActivity : ComponentActivity() {
         hardwareVolume = getPreferences(MODE_PRIVATE).getBoolean("hwvol", false)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
+        dspEnabled = getPreferences(MODE_PRIVATE).getBoolean("dspEnabled", false)
+        dspConfig = DspConfig(
+            bands = DspJson.bandsFromJson(
+                getPreferences(MODE_PRIVATE).getString("dspBands", "[]")
+            ),
+            preampDb = getPreferences(MODE_PRIVATE).getFloat("dspPreampDb", 0f).toDouble(),
+            autoHeadroom = getPreferences(MODE_PRIVATE).getBoolean("dspAutoHeadroom", true)
+        )
+        dspPresetName = getPreferences(MODE_PRIVATE)
+            .getString("dspPresetName", "Flat") ?: "Flat"
+        dspUserPresets = DspJson.presetsFromJson(
+            getPreferences(MODE_PRIVATE).getString("dspUserPresets", "[]")
+        )
+
         val savedTree = getPreferences(MODE_PRIVATE).getString("tree", null)
         if (savedTree != null) {
             folderLabel = folderLabelOf(savedTree)
@@ -461,6 +487,11 @@ class MainActivity : ComponentActivity() {
                         if (uri != null) runCatching { importBackup(uri) }
                             .onFailure { backupMessage = "Import failed: ${it.message}" }
                     }
+                    val autoEqLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.OpenDocument()
+                    ) { uri ->
+                        if (uri != null) importAutoEq(uri)
+                    }
 
                     val picker = rememberLauncherForActivityResult(
                         ActivityResultContracts.OpenDocumentTree()
@@ -481,6 +512,7 @@ class MainActivity : ComponentActivity() {
                     if (showQueue) BackHandler { showQueue = false }
                     if (openArtist != null) BackHandler { openArtist = null }
                     if (showFavorites) BackHandler { showFavorites = false }
+                    if (showEq) BackHandler { showEq = false }
                     if (showNowPlaying) BackHandler { showNowPlaying = false }
                     if (showNowPlaying) {
                         NowPlayingScreen(
@@ -512,7 +544,11 @@ class MainActivity : ComponentActivity() {
                             isFavorite = lastPlayed?.uri?.let { favorites.contains(it) } == true,
                             onToggleFavorite = {
                                 lastPlayed?.uri?.let { toggleFavorite(it) }
-                            }
+                            },
+                            exclusive = exclusive,
+                            dspEnabled = dspEnabled,
+                            ditherOn = dither,
+                            hardwareVolume = hardwareVolume
                         )
                         return@Surface
                     }
@@ -583,6 +619,31 @@ class MainActivity : ComponentActivity() {
                         return@Surface
                     }
 
+                    if (showEq) {
+                        EqScreen(
+                            transportFlow = service?.state,
+                            enabled = dspEnabled,
+                            config = dspConfig,
+                            presetName = dspPresetName,
+                            userPresets = dspUserPresets,
+                            importMessage = eqImportMessage,
+                            onBack = { showEq = false },
+                            onEnabled = { applyDspEnabled(it) },
+                            onConfig = { applyDspConfig(it) },
+                            onPresetName = { applyPresetName(it) },
+                            onSavePreset = { name, cfg -> saveUserPreset(name, cfg) },
+                            onRenamePreset = { old, new -> renameUserPreset(old, new) },
+                            onDeletePreset = { deleteUserPreset(it) },
+                            onImport = {
+                                autoEqLauncher.launch(
+                                    arrayOf("text/plain", "text/*", "*/*")
+                                )
+                            },
+                            onReset = { resetEq() }
+                        )
+                        return@Surface
+                    }
+
                     Scaffold(
                         bottomBar = {
                             Column(Modifier.navigationBarsPadding()) {
@@ -634,7 +695,11 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onShuffleAll = { shuffleAll() },
                                     onPlayTracks = { list -> if (list.isNotEmpty()) playList(list, 0) },
-                                    onOpenAlbum = { openAlbum = it }
+                                    onOpenAlbum = { openAlbum = it },
+                                    dspEnabled = dspEnabled,
+                                    ditherOn = dither,
+                                    hardwareVolume = hardwareVolume,
+                                    volume = volume
                                 )
                                 Tab.MUSIC -> MusicScreen(
                                     albums = albums,
@@ -684,7 +749,13 @@ class MainActivity : ComponentActivity() {
                                         service?.setHardwareVolume(it)
                                         getPreferences(MODE_PRIVATE).edit()
                                             .putBoolean("hwvol", it).apply()
-                                    }
+                                    },
+                                    dspEnabled = dspEnabled,
+                                    dspConfig = dspConfig,
+                                    dspPresetName = dspPresetName,
+                                    ditherOn = dither,
+                                    onDspEnabled = { applyDspEnabled(it) },
+                                    onOpenEq = { showEq = true }
                                 )
                                 Tab.SETTINGS -> SettingsScreen(
                                     folderLabel = folderLabel.ifEmpty { "not set" },
@@ -818,6 +889,114 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    /* --------------------------------------------------------------- DSP */
+
+    private fun saveDspPrefs() {
+        getPreferences(MODE_PRIVATE).edit()
+            .putBoolean("dspEnabled", dspEnabled)
+            .putFloat("dspPreampDb", dspConfig.preampDb.toFloat())
+            .putBoolean("dspAutoHeadroom", dspConfig.autoHeadroom)
+            .putString("dspBands", DspJson.bandsToJson(dspConfig.bands).toString())
+            .putString("dspPresetName", dspPresetName)
+            .putString("dspUserPresets", DspJson.presetsToJson(dspUserPresets).toString())
+            .apply()
+    }
+
+    /** 30 ms debounce for slider drags; immediate for toggles/presets. */
+    private fun scheduleDspPush(immediate: Boolean = false) {
+        dspPushJob?.cancel()
+        dspPushJob = lifecycleScope.launch {
+            if (!immediate) delay(30)
+            val p = service?.player ?: return@launch
+            p.setDspConfig(dspConfig)
+            p.setDspEnabled(dspEnabled)
+        }
+    }
+
+    private fun applyDspConfig(config: DspConfig, preset: String? = null,
+                               immediate: Boolean = false) {
+        dspConfig = config
+        if (preset != null) dspPresetName = preset
+        saveDspPrefs()
+        scheduleDspPush(immediate)
+    }
+
+    private fun applyDspEnabled(on: Boolean) {
+        dspEnabled = on
+        saveDspPrefs()
+        scheduleDspPush(immediate = true)
+    }
+
+    private fun applyPresetName(name: String) {
+        dspPresetName = name
+        saveDspPrefs()
+    }
+
+    private fun saveUserPreset(name: String, config: DspConfig) {
+        val list = dspUserPresets.toMutableList()
+        val at = list.indexOfFirst { it.name == name }
+        if (at >= 0) list[at] = EqPreset(name, config)
+        else list.add(EqPreset(name, config))
+        dspUserPresets = list
+        dspConfig = config
+        dspPresetName = name
+        saveDspPrefs()
+    }
+
+    private fun renameUserPreset(old: String, new: String) {
+        if (old == new || new.isBlank()) return
+        dspUserPresets = dspUserPresets.map {
+            if (it.name == old) EqPreset(new, it.config) else it
+        }
+        if (dspPresetName == old) dspPresetName = new
+        saveDspPrefs()
+    }
+
+    private fun deleteUserPreset(name: String) {
+        dspUserPresets = dspUserPresets.filterNot { it.name == name }
+        if (dspPresetName == name) {
+            dspConfig = DspPresets.Flat
+            dspPresetName = "Flat"
+            scheduleDspPush(immediate = true)
+        }
+        saveDspPrefs()
+    }
+
+    private fun resetEq() {
+        dspConfig = DspPresets.Flat
+        dspPresetName = "Flat"
+        eqImportMessage = null
+        saveDspPrefs()
+        scheduleDspPush(immediate = true)
+    }
+
+    private fun importAutoEq(uri: Uri) {
+        runCatching {
+            val text = contentResolver.openInputStream(uri)?.bufferedReader()
+                ?.use { it.readText() } ?: error("cannot read file")
+            val parsed = AutoEqParser.parse(text)
+            if (parsed.bands.isEmpty() && parsed.preampDb == null)
+                error("no filters found")
+            val name = uri.lastPathSegment?.substringAfterLast('/')
+                ?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: "AutoEQ"
+            dspConfig = DspConfig(
+                bands = parsed.bands,
+                preampDb = parsed.preampDb ?: dspConfig.preampDb,
+                autoHeadroom = true
+            )
+            dspPresetName = name
+            eqImportMessage = if (parsed.ignored > 0) {
+                "${parsed.ignored} filters ignored"
+            } else {
+                "Imported ${parsed.bands.size} filters"
+            }
+            saveDspPrefs()
+            scheduleDspPush(immediate = true)
+        }.onFailure {
+            eqImportMessage = "Import failed: ${it.message}"
+        }
+    }
+
     /* ------------------------------------------------------ backup/restore */
 
     private fun exportBackup(uri: Uri) {
@@ -840,6 +1019,12 @@ class MainActivity : ComponentActivity() {
             put("volume", volume.toDouble())
             put("hardwareVolume", hardwareVolume)
             put("exclusive", exclusive)
+            put("dspEnabled", dspEnabled)
+            put("dspPreampDb", dspConfig.preampDb)
+            put("dspAutoHeadroom", dspConfig.autoHeadroom)
+            put("dspBands", DspJson.bandsToJson(dspConfig.bands))
+            put("dspPresetName", dspPresetName)
+            put("dspUserPresets", DspJson.presetsToJson(dspUserPresets))
         }
         val root = org.json.JSONObject().apply {
             put("app", "VCHiFiMP")
@@ -886,6 +1071,20 @@ class MainActivity : ComponentActivity() {
         hardwareVolume = bool("hardwareVolume", hardwareVolume)
         exclusive = bool("exclusive", exclusive)
 
+        // Additive: old backups simply have none of these keys.
+        dspEnabled = bool("dspEnabled", dspEnabled)
+        val dspBandsArr = st.optJSONArray("dspBands")
+        dspConfig = DspConfig(
+            bands = dspBandsArr?.let { DspJson.bandsFromJson(it.toString()) }
+                ?: dspConfig.bands,
+            preampDb = if (st.has("dspPreampDb")) st.getDouble("dspPreampDb")
+                       else dspConfig.preampDb,
+            autoHeadroom = bool("dspAutoHeadroom", dspConfig.autoHeadroom)
+        )
+        dspPresetName = st.optString("dspPresetName", dspPresetName)
+        dspUserPresets = st.optJSONArray("dspUserPresets")
+            ?.let { DspJson.presetsFromJson(it.toString()) } ?: dspUserPresets
+
         favorites = root.optJSONArray("favorites")?.let { arr ->
             (0 until arr.length()).mapNotNull { arr.optString(it).ifEmpty { null } }.toSet()
         } ?: favorites
@@ -914,6 +1113,12 @@ class MainActivity : ComponentActivity() {
             putFloat("volume", volume)
             putBoolean("hwvol", hardwareVolume)
             putBoolean("exclusive", exclusive)
+            putBoolean("dspEnabled", dspEnabled)
+            putFloat("dspPreampDb", dspConfig.preampDb.toFloat())
+            putBoolean("dspAutoHeadroom", dspConfig.autoHeadroom)
+            putString("dspBands", DspJson.bandsToJson(dspConfig.bands).toString())
+            putString("dspPresetName", dspPresetName)
+            putString("dspUserPresets", DspJson.presetsToJson(dspUserPresets).toString())
             apply()
         }
 
@@ -928,6 +1133,8 @@ class MainActivity : ComponentActivity() {
             setHardwareVolume(hardwareVolume)
             setExclusive(exclusive)
             setSleepTimer(sleepMinutes)
+            player.setDspConfig(dspConfig)
+            player.setDspEnabled(dspEnabled)
             restoreLastPlayed(
                 root.optString("lastPlayed").takeIf { it.isNotBlank() && it != "null" }
             )
