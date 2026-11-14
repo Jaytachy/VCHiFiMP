@@ -2,6 +2,8 @@ package dev.jay.usbdirect
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -18,6 +20,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.PlayArrow
@@ -113,6 +119,7 @@ fun BottomNav(selected: Tab, onSelect: (Tab) -> Unit, modifier: Modifier = Modif
 fun MiniPlayer(
     transportFlow: StateFlow<TransportState>?,
     volume: Float,
+    artVersion: Int = 0,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
@@ -123,51 +130,56 @@ fun MiniPlayer(
     val transport = rememberTransport(transportFlow)
     if (transport.title.isEmpty()) return
 
-    var dragging by remember { mutableStateOf(false) }
-    var dragPos by remember { mutableStateOf(0f) }
     val dur = transport.durationMs.coerceAtLeast(1L)
+    val frac = (transport.positionMs.toFloat() / dur).coerceIn(0f, 1f)
 
     Surface(
-        tonalElevation = 4.dp,
-        color = MaterialTheme.colorScheme.surfaceContainer
+        shape = RoundedCornerShape(18.dp),
+        tonalElevation = 6.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+            .clickable { onExpand() }
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().clickable { onExpand() }
+        Column {
+            // razor-thin progress along the top edge
+            Box(
+                Modifier.fillMaxWidth().height(2.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                Text(
-                    transport.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    fmtTime(transport.positionMs) + " / " + fmtTime(transport.durationMs),
-                    style = MaterialTheme.typography.labelSmall
+                Box(
+                    Modifier.fillMaxWidth(frac).fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.primary)
                 )
             }
-            Slider(
-                value = (if (dragging) dragPos else transport.positionMs.toFloat())
-                    .coerceIn(0f, dur.toFloat()),
-                valueRange = 0f..dur.toFloat(),
-                onValueChange = { dragging = true; dragPos = it },
-                onValueChangeFinished = { dragging = false; onSeek(dragPos.toLong()) },
-                modifier = Modifier.fillMaxWidth().height(26.dp)
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onPrev) { Text("|◀") }
-                TextButton(onClick = onPlayPause) {
-                    Text(if (transport.playing) "Pause" else "Play")
+            Row(
+                Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ArtImage(transport.album, transport.artist, artVersion, Modifier.size(44.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        transport.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        transport.artist.ifEmpty { "Unknown artist" },
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                TextButton(onClick = onNext) { Text("▶|") }
-                Spacer(Modifier.width(6.dp))
-                Slider(
-                    value = volume,
-                    onValueChange = onVolume,
-                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp)
-                )
-                Text("${(volume * 100).toInt()}%",
-                     style = MaterialTheme.typography.labelSmall)
+                IconButton(onClick = onPlayPause) {
+                    Icon(
+                        if (transport.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (transport.playing) "Pause" else "Play"
+                    )
+                }
+                IconButton(onClick = onNext) {
+                    Icon(Icons.Default.SkipNext, contentDescription = "Next")
+                }
             }
         }
     }
@@ -181,6 +193,11 @@ fun HomeScreen(
     lastPlayed: LastPlayed?,
     albums: List<LibAlbum>,
     artVersion: Int,
+    dacName: String,
+    exclusive: Boolean,
+    onOutput: () -> Unit,
+    favoritesCount: Int,
+    onFavorites: () -> Unit,
     onResumeLast: () -> Unit,
     onShuffleAll: () -> Unit,
     onOpenAlbum: (LibAlbum) -> Unit,
@@ -188,16 +205,30 @@ fun HomeScreen(
 ) {
     val transport = rememberTransport(transportFlow)
     val showingNow = transport.title.isNotEmpty()
+    val rateLabel = transport.format.substringAfterLast("·").trim()
+    val outputLabel =
+        if (dacName.isNotEmpty()) {
+            if (rateLabel.isNotEmpty()) "$dacName \u2022 $rateLabel" else dacName
+        } else "Phone audio"
+    val bitPerfect = exclusive && transport.playing && transport.format.isNotEmpty()
 
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
         item {
             Spacer(Modifier.height(26.dp))
-            Text("VCHiFiMP", style = MaterialTheme.typography.headlineMedium)
-            Text(
-                "Direct USB · bit-perfect when the file allows",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("VCHiFiMP", style = MaterialTheme.typography.headlineMedium)
+                    Text(
+                        "Direct USB audio",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutputPill(outputLabel, bitPerfect, onOutput)
+            }
             Spacer(Modifier.height(22.dp))
         }
 
@@ -257,8 +288,13 @@ fun HomeScreen(
                 ShortcutTile("Artists", Modifier.weight(1f)) { onShortcut(LibSection.ARTISTS) }
             }
             Spacer(Modifier.height(10.dp))
-            FilledTonalButton(onClick = onShuffleAll, modifier = Modifier.fillMaxWidth()) {
-                Text("Shuffle all")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                FilledTonalButton(onClick = onShuffleAll, modifier = Modifier.weight(1f)) {
+                    Text("Shuffle all")
+                }
+                OutlinedButton(onClick = onFavorites, modifier = Modifier.weight(1f)) {
+                    Text("Favorites ($favoritesCount)")
+                }
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -346,11 +382,15 @@ fun MusicScreen(
     scanState: String,
     artVersion: Int,
     onOpenAlbum: (LibAlbum) -> Unit,
+    onOpenArtist: (String) -> Unit,
     onPlayList: (List<LibTrack>, Int) -> Unit,
     section: LibSection,
     onSection: (LibSection) -> Unit,
     onChooseFolder: () -> Unit,
-    onRescan: () -> Unit
+    onRescan: () -> Unit,
+    onFavorites: () -> Unit = {},
+    favoritesCount: Int = 0,
+    onTrackMenu: (LibTrack) -> Unit = {}
 ) {
     var grid by remember { mutableStateOf(true) }
     var sort by remember { mutableStateOf(SortBy.TITLE) }
@@ -426,6 +466,17 @@ fun MusicScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Library", style = MaterialTheme.typography.headlineMedium,
                      modifier = Modifier.weight(1f))
+                IconButton(onClick = onFavorites) {
+                    BadgedBox(badge = {
+                        if (favoritesCount > 0) Badge { Text("$favoritesCount") }
+                    }) {
+                        Icon(
+                            Icons.Default.FavoriteBorder,
+                            contentDescription = "Favorites",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 TextButton(onClick = onChooseFolder) { Text("Folder") }
                 TextButton(onClick = onRescan, enabled = !scanning) { Text("Rescan") }
             }
@@ -488,16 +539,16 @@ fun MusicScreen(
 
         when (section) {
             LibSection.SONGS -> if (grid) {
-                SongGrid(shownTracks, artVersion, onPlayList)
+                SongGrid(shownTracks, artVersion, onPlayList, onTrackMenu)
             } else {
-                SongList(shownTracks, artVersion, onPlayList)
+                SongList(shownTracks, artVersion, onPlayList, onTrackMenu)
             }
             LibSection.ALBUMS -> if (grid) {
                 AlbumGrid(shownAlbums, artVersion, albums.size, onOpenAlbum)
             } else {
                 AlbumList(shownAlbums, artVersion, onOpenAlbum)
             }
-            LibSection.ARTISTS -> ArtistList(shownArtists) { artistFilter = it }
+            LibSection.ARTISTS -> ArtistList(shownArtists) { onOpenArtist(it) }
         }
     }
 }
@@ -508,11 +559,13 @@ private enum class SortBy(val label: String) {
     TITLE("Title"), ARTIST("Artist"), ALBUM("Album"), DURATION("Duration"), MODIFIED("Modified")
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SongList(
+fun SongList(
     tracks: List<LibTrack>,
     artVersion: Int,
-    onPlayList: (List<LibTrack>, Int) -> Unit
+    onPlayList: (List<LibTrack>, Int) -> Unit,
+    onTrackMenu: ((LibTrack) -> Unit)? = null
 ) {
     if (tracks.isEmpty()) {
         Text("No tracks. Choose a folder.", Modifier.padding(20.dp),
@@ -520,7 +573,7 @@ private fun SongList(
              color = MaterialTheme.colorScheme.onSurfaceVariant)
         return
     }
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         itemsIndexed(
             tracks,
             key = { i, t -> t.uri.toString() + "#" + i },
@@ -534,8 +587,12 @@ private fun SongList(
                 ).joinToString("  ·  ")
             }
             Row(
-                Modifier.fillMaxWidth().clickable { onPlayList(tracks, i) }
-                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                Modifier.fillMaxWidth()
+                    .combinedClickable(
+                        onClick = { onPlayList(tracks, i) },
+                        onLongClick = { onTrackMenu?.invoke(t) }
+                    )
+                    .padding(start = 20.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TrackThumb(t, artVersion, 48)
@@ -550,16 +607,23 @@ private fun SongList(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                if (onTrackMenu != null) {
+                    IconButton(onClick = { onTrackMenu.invoke(t) }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More")
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun SongGrid(
     tracks: List<LibTrack>,
     artVersion: Int,
-    onPlayList: (List<LibTrack>, Int) -> Unit
+    onPlayList: (List<LibTrack>, Int) -> Unit,
+    onTrackMenu: ((LibTrack) -> Unit)? = null
 ) {
     if (tracks.isEmpty()) {
         Text("No tracks. Choose a folder.", Modifier.padding(20.dp),
@@ -570,7 +634,7 @@ private fun SongGrid(
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 96.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -580,7 +644,12 @@ private fun SongGrid(
             contentType = { "song" }
         ) { i ->
             val t = tracks[i]
-            Column(Modifier.clickable { onPlayList(tracks, i) }) {
+            Column(
+                Modifier.combinedClickable(
+                    onClick = { onPlayList(tracks, i) },
+                    onLongClick = { onTrackMenu?.invoke(t) }
+                )
+            ) {
                 TrackArt(t, artVersion)
                 Spacer(Modifier.height(6.dp))
                 Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -649,7 +718,7 @@ private fun AlbumGrid(
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 96.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -666,7 +735,7 @@ private fun AlbumGrid(
 
 @Composable
 private fun AlbumList(albums: List<LibAlbum>, artVersion: Int, onOpenAlbum: (LibAlbum) -> Unit) {
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         items(
             albums,
             key = { it.name + "\u0000" + it.artist },
@@ -722,7 +791,7 @@ private fun ArtistList(
     artists: List<Triple<String, List<LibTrack>, Int>>,
     onPick: (String) -> Unit
 ) {
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         itemsIndexed(
             artists,
             key = { _, a -> a.first },

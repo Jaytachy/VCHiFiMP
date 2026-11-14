@@ -63,7 +63,7 @@ class UsbDirectPlayer(private val context: Context) {
 
     val isRunning: Boolean get() = running
 
-    fun start(device: UsbDevice, uri: Uri, rate: Int, bits: Int, volume: Float,
+    fun start(device: UsbDevice?, uri: Uri, rate: Int, bits: Int, volume: Float,
               startMs: Long = 0L, useMixer: Boolean = false) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
@@ -75,7 +75,8 @@ class UsbDirectPlayer(private val context: Context) {
         if (useMixer) {
             startMixer(device, uri, dev, volume, startMs)
         } else {
-            startInternal(device, dev, bits, volume) { eng ->
+            // exclusive path always has a device; mixer mode may run without one
+            startInternal(device!!, dev, bits, volume) { eng ->
                 decodeLoop(uri, UsbTarget(eng), dev, startMs)
             }
         }
@@ -86,7 +87,7 @@ class UsbDirectPlayer(private val context: Context) {
      * rate is whatever the HAL picks, but it mixes with other apps and needs no
      * exclusive access.
      */
-    private fun startMixer(device: UsbDevice, uri: Uri, rate: Int, volume: Float, startMs: Long) {
+    private fun startMixer(device: UsbDevice?, uri: Uri, rate: Int, volume: Float, startMs: Long) {
         stop()
         val gen = ++session
         mixerVolume = volume
@@ -95,10 +96,13 @@ class UsbDirectPlayer(private val context: Context) {
             var track: AudioTrack? = null
             try {
                 val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                // Prefer the USB DAC when one is present; otherwise let the
+                // platform pick (speaker, Bluetooth, wired) so the app is still
+                // usable without a DAC plugged in.
                 val dev = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
                     it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
                     it.type == AudioDeviceInfo.TYPE_USB_DEVICE
-                } ?: throw IllegalStateException("no USB audio device for mixer path")
+                }
 
                 val fmt = AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
@@ -116,7 +120,7 @@ class UsbDirectPlayer(private val context: Context) {
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .setBufferSizeInBytes(rate / 10 * 8)
                     .build()
-                track.setPreferredDevice(dev)
+                if (dev != null) track.setPreferredDevice(dev)
                 track.play()
                 analyzer.start()
                 Log.i("VCProbe", "mixer sink open: " + rate + " Hz")

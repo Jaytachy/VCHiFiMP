@@ -51,6 +51,10 @@ class MainActivity : ComponentActivity() {
     private var folderLabel by mutableStateOf("")
     private var librarySection by mutableStateOf(LibSection.SONGS)
     private var lastPlayed by mutableStateOf<LastPlayed?>(null)
+    private var openArtist by mutableStateOf<String?>(null)
+    private var showFavorites by mutableStateOf(false)
+    private var sheetTrack by mutableStateOf<LibTrack?>(null)
+    private var favorites by mutableStateOf<Set<String>>(emptySet())
     private var artVersion by mutableStateOf(0)
     private var showNowPlaying by mutableStateOf(false)
     private var showQueue by mutableStateOf(false)
@@ -71,7 +75,20 @@ class MainActivity : ComponentActivity() {
             svc.setExclusive(exclusive)
             svc.setHardwareVolume(hardwareVolume)
             // needed so Home's "continue listening" can start on a cold launch
-            audioDevice()?.let { d -> if (usbManager.hasPermission(d)) svc.setDevice(d, 24, volume) }
+            val dac = audioDevice()
+            if (dac != null && usbManager.hasPermission(dac)) {
+                svc.setDevice(dac, 24, volume)
+                dacName = dac.productName ?: "USB DAC"
+            } else if (dac != null) {
+                // DAC present but no grant yet (fresh install / replug): ask now
+                // so the next tap takes the bit-perfect path.
+                requestUsb(dac)
+            } else if (dac == null) {
+                // no DAC: fall back to the phone/Bluetooth mixer silently
+                exclusive = false
+                svc.setExclusive(false)
+                dacName = ""
+            }
             lifecycleScope.launch { svc.lastPlayed.collect { lastPlayed = it } }
             lifecycleScope.launch {
                 var lastMissing: String? = null
@@ -149,6 +166,23 @@ class MainActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName?) { service = null }
     }
 
+    private val usbEvents = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val d = audioDevice() ?: return
+                    if (usbManager.hasPermission(d)) attachDac(d) else requestUsb(d)
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    dacName = ""
+                    exclusive = false
+                    service?.setExclusive(false)
+                    Log.i("VCProbe", "DAC detached -> phone audio")
+                }
+            }
+        }
+    }
+
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (intent.action != ACTION_USB_PERMISSION) return
@@ -162,6 +196,8 @@ class MainActivity : ComponentActivity() {
                 pendingPlay = null
                 service?.setDevice(d, 24, volume)
                 service?.setQueue(p.first, p.second)
+            } else {
+                attachDac(d)
             }
         }
     }
@@ -171,6 +207,15 @@ class MainActivity : ComponentActivity() {
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         val flags = if (Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0
         registerReceiver(permissionReceiver, IntentFilter(ACTION_USB_PERMISSION), flags)
+        registerReceiver(
+            usbEvents,
+            IntentFilter().apply {
+                addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+                addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+            },
+            flags
+        )
+        favorites = Favorites.load(this)
 
         bindService(Intent(this, PlaybackService::class.java), conn, Context.BIND_AUTO_CREATE)
 
@@ -205,6 +250,18 @@ class MainActivity : ComponentActivity() {
             "settings" -> tab = Tab.SETTINGS
         }
 
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            when (intent?.getStringExtra("detail")) {
+                "album" -> albums.firstOrNull {
+                    ArtStore.existing(this, it.name, it.artist) != null
+                }?.let { openAlbum = it }
+                "artist" -> tracks.firstOrNull()?.artist?.ifEmpty { null }
+                    ?.let { openArtist = it }
+                "favorites" -> showFavorites = true
+                "sheet" -> tracks.firstOrNull()?.let { sheetTrack = it }
+            }
+        }, 1200)
+
         setContent {
             VcTheme(darkTheme) {
                 Surface(Modifier.fillMaxSize()) {
@@ -226,6 +283,8 @@ class MainActivity : ComponentActivity() {
                     val album = openAlbum
                     if (album != null) BackHandler { openAlbum = null }
                     if (showQueue) BackHandler { showQueue = false }
+                    if (openArtist != null) BackHandler { openArtist = null }
+                    if (showFavorites) BackHandler { showFavorites = false }
                     if (showNowPlaying) BackHandler { showNowPlaying = false }
                     if (showNowPlaying) {
                         NowPlayingScreen(
@@ -252,7 +311,77 @@ class MainActivity : ComponentActivity() {
                             onToggleShuffle = {
                                 service?.setShuffle(service?.state?.value?.shuffle != true)
                             },
-                            onCycleRepeat = { service?.cycleRepeat() }
+                            onCycleRepeat = { service?.cycleRepeat() },
+                            isFavorite = lastPlayed?.uri?.let { favorites.contains(it) } == true,
+                            onToggleFavorite = {
+                                lastPlayed?.uri?.let { toggleFavorite(it) }
+                            }
+                        )
+                        return@Surface
+                    }
+
+                    TrackActionSheet(
+                        track = sheetTrack,
+                        isFavorite = sheetTrack?.uri?.toString()
+                            ?.let { favorites.contains(it) } == true,
+                        onDismiss = { sheetTrack = null },
+                        onPlayNext = {
+                            sheetTrack?.let { service?.playNext(it.toQueueTrack()) }
+                            sheetTrack = null
+                        },
+                        onEnqueue = {
+                            sheetTrack?.let { service?.enqueue(it.toQueueTrack()) }
+                            sheetTrack = null
+                        },
+                        onToggleFavorite = {
+                            sheetTrack?.uri?.toString()?.let { toggleFavorite(it) }
+                            sheetTrack = null
+                        },
+                        onGoToAlbum = {
+                            val t = sheetTrack
+                            if (t != null) {
+                                albums.firstOrNull { it.name == t.album && it.artist == t.artist }
+                                    ?.let { openAlbum = it }
+                            }
+                            sheetTrack = null
+                        }
+                    )
+
+                    val artist = openArtist
+                    if (album != null) {
+                        AlbumDetailScreen(
+                            album = album,
+                            artVersion = artVersion,
+                            onBack = { openAlbum = null },
+                            onPlayAll = { playList(album.tracks, 0) },
+                            onShuffle = { playList(album.tracks.shuffled(), 0) },
+                            onPlayTrack = { playList(album.tracks, it) },
+                            onTrackMenu = { sheetTrack = it }
+                        )
+                        return@Surface
+                    }
+                    if (artist != null) {
+                        ArtistDetailScreen(
+                            name = artist,
+                            albums = albums.filter { it.artist == artist },
+                            tracks = tracks.filter {
+                                it.artist.ifEmpty { "Unknown artist" } == artist
+                            },
+                            artVersion = artVersion,
+                            onBack = { openArtist = null },
+                            onOpenAlbum = { openAlbum = it },
+                            onPlayList = { list, i -> playList(list, i) },
+                            onTrackMenu = { sheetTrack = it }
+                        )
+                        return@Surface
+                    }
+                    if (showFavorites) {
+                        FavoritesScreen(
+                            tracks = tracks.filter { favorites.contains(it.uri.toString()) },
+                            artVersion = artVersion,
+                            onBack = { showFavorites = false },
+                            onPlayList = { list, i -> playList(list, i) },
+                            onTrackMenu = { sheetTrack = it }
                         )
                         return@Surface
                     }
@@ -263,6 +392,7 @@ class MainActivity : ComponentActivity() {
                                 MiniPlayer(
                                     transportFlow = service?.state,
                                     volume = volume,
+                                    artVersion = artVersion,
                                     onPlayPause = {
                                         if (service?.state?.value?.playing == true) service?.pause()
                                         else service?.resume()
@@ -283,14 +413,17 @@ class MainActivity : ComponentActivity() {
                         }
                     ) { pad ->
                         Box(Modifier.padding(pad).fillMaxSize()) {
-                            if (album != null) {
-                                AlbumScreen(album) { openAlbum = null }
-                            } else when (tab) {
+                            when (tab) {
                                 Tab.HOME -> HomeScreen(
                                     transportFlow = service?.state,
                                     lastPlayed = lastPlayed,
                                     albums = albums,
                                     artVersion = artVersion,
+                                    dacName = dacName,
+                                    exclusive = exclusive,
+                                    onOutput = { tab = Tab.OUTPUT },
+                                    favoritesCount = favorites.size,
+                                    onFavorites = { showFavorites = true },
                                     onResumeLast = { service?.resumeLast() },
                                     onShuffleAll = { shuffleAll() },
                                     onOpenAlbum = { openAlbum = it },
@@ -308,12 +441,16 @@ class MainActivity : ComponentActivity() {
                                     section = librarySection,
                                     onSection = { librarySection = it },
                                     onOpenAlbum = { openAlbum = it },
+                                    onOpenArtist = { openArtist = it },
                                     onPlayList = { list, i -> playList(list, i) },
                                     onChooseFolder = { picker.launch(null) },
                                     onRescan = {
                                         getPreferences(MODE_PRIVATE).getString("tree", null)
                                             ?.let { scan(Uri.parse(it)) }
-                                    }
+                                    },
+                                    onFavorites = { showFavorites = true },
+                                    favoritesCount = favorites.size,
+                                    onTrackMenu = { sheetTrack = it }
                                 )
                                 Tab.OUTPUT -> OutputScreen(
                                     analyzer = service?.player?.analyzer,
@@ -413,27 +550,57 @@ class MainActivity : ComponentActivity() {
 
     private fun playList(list: List<LibTrack>, index: Int) {
         if (list.isEmpty()) { Log.i("VCProbe", "playList: empty"); return }
-        val d = audioDevice()
-
-        if (d == null) { dacName = "no USB DAC plugged in"; return }
         val q = list.map { it.toQueueTrack() }
-        if (usbManager.hasPermission(d)) {
-            service?.setDevice(d, 24, volume)
-            service?.setQueue(q, index)
-        } else {
+        val d = audioDevice()
+        if (d != null && !usbManager.hasPermission(d)) {
+            // DAC is there but the grant is missing (fresh install / replug).
             pendingPlay = q to index
             requestUsb(d)
+            return
         }
+        routeTo(d)
+        service?.setQueue(q, index)
     }
 
     private fun shuffleAll() {
-        val d = audioDevice()
-        if (d == null) { dacName = "no USB DAC plugged in"; return }
         if (tracks.isEmpty()) return
         val shuffled = tracks.shuffled().map { it.toQueueTrack() }
-        if (!usbManager.hasPermission(d)) { requestUsb(d); return }
-        service?.setDevice(d, 24, volume)
+        val d = audioDevice()
+        if (d != null && !usbManager.hasPermission(d)) {
+            pendingPlay = shuffled to 0
+            requestUsb(d)
+            return
+        }
+        routeTo(d)
         service?.setQueue(shuffled, 0)
+    }
+
+    /** Point the service at a DAC when there is a usable one, else at the mixer. */
+    private fun routeTo(d: UsbDevice?) {
+        if (d != null) {
+            dacName = d.productName ?: "USB DAC"
+            exclusive = true
+            service?.setDevice(d, 24, volume)
+            service?.setExclusive(true)
+        } else {
+            dacName = ""
+            exclusive = false
+            service?.setExclusive(false)
+        }
+    }
+
+    private fun toggleFavorite(uri: String) {
+        favorites = if (favorites.contains(uri)) favorites - uri else favorites + uri
+        Favorites.save(this, favorites)
+    }
+
+    private fun attachDac(d: UsbDevice) {
+        dacName = d.productName ?: "USB DAC"
+        exclusive = true
+        service?.setDevice(d, 24, volume)
+        service?.setExclusive(true)
+        getPreferences(MODE_PRIVATE).edit().putBoolean("exclusive", true).apply()
+        Log.i("VCProbe", "DAC attached: $dacName")
     }
 
     private fun requestUsb(d: UsbDevice) {
@@ -517,6 +684,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         cancelScan.set(true)
         runCatching { unregisterReceiver(permissionReceiver) }
+        runCatching { unregisterReceiver(usbEvents) }
         runCatching { unbindService(conn) }
     }
 

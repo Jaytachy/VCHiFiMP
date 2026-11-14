@@ -264,10 +264,6 @@ class PlaybackService : Service() {
     /** Used by Home on a cold start, when no queue exists yet. */
     fun resumeLast() {
         val lp = _lastPlayed.value ?: return
-        if (device == null) {
-            _state.value = _state.value.copy(error = "no USB DAC selected")
-            return
-        }
         setQueue(
             listOf(Track(Uri.parse(lp.uri), lp.title, lp.durationMs, lp.artist, lp.album, lp.codec)),
             0
@@ -277,10 +273,10 @@ class PlaybackService : Service() {
     fun playAt(i: Int, fromMs: Long = 0L) {
         Log.i("VCProbe", "playAt($i, fromMs=$fromMs)")
         val t = queue.getOrNull(i) ?: return
-        val d = device ?: run {
-            _state.value = _state.value.copy(error = "no USB DAC selected")
-            return
-        }
+        // No claimed device (no DAC, or permission not granted yet): fall back to
+        // the platform mixer rather than silently swallowing the user's tap.
+        val d = device
+        val mixer = !exclusive || d == null
         index = i
         pausedAtMs = fromMs
         val codec = t.codec.ifEmpty { MediaProbe.codecOf(t.uri) }
@@ -294,7 +290,7 @@ class PlaybackService : Service() {
                                    t.durationMs, codec))
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
-        player.start(d, t.uri, 48000, bits, volume, fromMs, useMixer = !exclusive)
+        player.start(d, t.uri, 48000, bits, volume, fromMs, useMixer = mixer)
     }
 
     fun play() = if (index >= 0) playAt(index, pausedAtMs) else Unit
@@ -409,6 +405,22 @@ class PlaybackService : Service() {
             val next = (if (at >= 0) at else index).coerceIn(0, queue.lastIndex)
             playAt(next)
         }
+    }
+
+    /** Queue helpers used by the UI; they never touch the audio path. */
+    fun playNext(track: Track) {
+        val at = (index + 1).coerceIn(0, queue.size)
+        queue.add(at, track)
+        originalQueue.add(track)
+        _queueFlow.value = queue.toList()
+        _state.value = _state.value.copy(queueSize = queue.size)
+    }
+
+    fun enqueue(track: Track) {
+        queue.add(track)
+        originalQueue.add(track)
+        _queueFlow.value = queue.toList()
+        _state.value = _state.value.copy(queueSize = queue.size)
     }
 
     fun setVolume(v: Float) {
