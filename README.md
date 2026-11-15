@@ -13,11 +13,11 @@ yours to set.
 VCHiFiMP takes the other road. It opens the USB device itself, selects the
 UAC1 alt setting for the exact format it wants, and streams PCM as
 isochronous USB transfers, one packet per millisecond. No ALSA, no PipeWire,
-no AudioFlinger, no mixer. Volume is applied by us, in floating point, with
-TPDF dither when the signal is packed down to 16- or 24-bit.
+no AudioFlinger, no mixer. Volume is applied by us in floating point; dither is
+added only when the signal is actually modified.
 
-The result is the DAC receiving exactly the samples we decoded, at exactly the
-rate it asked for.
+With a bit-perfect path, the DAC receives exactly the samples we decoded, at
+exactly the rate it asked for.
 
 ## What it does today
 
@@ -33,28 +33,46 @@ Core:
 - Streams with a 12-URB pipeline of 8 one-millisecond isochronous packets.
 - Supports fractional packet sizes, so 44.1 kHz works as alternating
   44/45-frame packets instead of being resampled.
-- Software volume + TPDF dither (switchable), applied in float before packing.
+- In the Android app, TPDF dither is applied automatically only when samples
+  are modified: software volume below 100%, DSP on, resampling, or bit-depth
+  reduction. A master toggle can disable it. At unity volume with no DSP and
+  native rate, samples are written exactly.
 - Resamples only content the DAC cannot take natively, with
   `SRC_SINC_MEDIUM/BEST/FASTEST` selectable.
 - True gapless continuation between same-format tracks: one decode thread, one
   ring, metadata flips on the audible sample boundary.
 - UAC Feature Unit hardware volume, with float gain locked at unity when active.
 
-Android app (`v1.0.0`):
+Android app (`v1.1.0`):
 
 - SAF library scan with JSON cache, tags, Songs/Albums/Artists, search, sort,
   favourites, queue sheet, shuffle and 3-state repeat.
-- Album and artist detail screens, track action sheet (play next, enqueue,
-  favourite, go to album).
-- Floating mini-player and full-screen Now Playing with dynamic album-art
-  colours, swipe-to-dismiss and a play/pause cover scale.
-- Foreground `PlaybackService` with MediaSession, lock screen and media keys.
-- Output tab with live pipeline telemetry (URBs, underruns, jitter, ring fill),
-  FFT spectrum, level meter and DAC descriptor tree.
-- Settings hub: output depth, resampler quality, dither, gapless, DAC
-  re-claim on replug, sleep timer, theme, dynamic colours, short-track filter.
+- Redesigned Home screen.
+- Excluded folders stay out of the library.
+- Album, artist and favourites screens with the mini player kept visible; track
+  action sheet (play next, enqueue, favourite, go to album).
+- Full-screen Now Playing with dynamic album-art colours, swipe-to-dismiss and a
+  play/pause cover scale.
+- Native DSP rack: 10-band parametric EQ, high-pass and low-pass filters,
+  preamp, auto headroom and true bypass.
+- EQ screen with a live response curve and AutoEQ `.txt` import.
+- Signal-path panel and bit-perfect indicator. The indicator is green only with
+  exclusive USB, no DSP, no resampling, no bit-depth reduction, and hardware
+  volume or software volume at 100%; otherwise it is amber PROCESSED with
+  reasons.
+- Resume position and full-queue resume.
 - USB detach keeps the playing track and pauses on the audible frame; the DAC
   is re-claimed automatically when it comes back.
+- Cold-start DAC claim, so a connected DAC is used instead of the phone mixer.
+- Mixer playback is labelled "Android mixer, not bit-perfect".
+- Foreground `PlaybackService` with MediaSession, lock screen and media keys;
+  notification controls for Previous, Play/Pause, Next and Stop.
+- Output tab with live pipeline telemetry (URBs, underruns, jitter, ring fill),
+  FFT spectrum, level meter and DAC descriptor tree.
+- Audio focus handling.
+- Settings hub: output depth, resampler quality, dither, gapless, DAC
+  re-claim on replug, sleep timer, theme, dynamic colours, short-track filter.
+- JSON backup/restore, including EQ settings.
 
 ## Layout
 
@@ -63,6 +81,11 @@ linux/     reference player and measurement tools - the fast debug loop
 android/   Kotlin + Compose app with the same C engine behind JNI
 tests/     test material
 ```
+
+## Requirements
+
+- Android 8.0 or newer (`minSdk 26`), with USB host support.
+- A UAC1 audio-streaming DAC.
 
 ## Measured, not assumed
 
@@ -73,6 +96,8 @@ Two real DACs were characterised through raw usbfs:
 | Jieli `3654:4a55` | adaptive endpoint, 44.1/48/96 kHz, S16 + S24_3LE. Measured ±2 ppm at 96k/24, no wow. Good. |
 | AB13X `0020:0b21` | 48k/16 only, free-runs ~+1400 ppm and re-corrects every 5 s. Sounds broken on piano. Avoid. |
 
+The AB13X measurement was made with the Linux tools.
+
 `libusbdac` also used a real AB13X to validate its UAC1 parser (their fixture
 is 8000/48000 Hz, EP 0x01, maxpkt 192, bInterval 4 — a different firmware to
 ours). They report no audio-quality observations; bit-perfect delivery cannot
@@ -81,14 +106,22 @@ own clocking.
 
 ## Status
 
-`v1.0.1` — Android app and Linux reference player both working; no root
-required (see the claim sequence). Release builds are minified with R8 and
-shrink resources (5.6 MB APK versus 20 MB debug).
+`v1.1.0` — Android app and Linux reference player both working; no root
+required (see the claim sequence). The Linux tooling remains playback and
+measurement only; DSP and EQ are Android features. Release builds are minified
+with R8 and shrink resources (under 6 MB APK versus about 20 MB debug).
+
+## Installing v1.1.0
+
+v1.1.0 is signed with a new key and cannot install over earlier debug-signed
+builds. Export a backup in Settings, uninstall the old app, install v1.1.0,
+then import the backup.
 
 ## Verified on hardware
 
 Samsung Galaxy A54 5G (SM-A546E/DS), Android 17 / One UI 9, kernel 5.15.197,
-SELinux enforcing, **unrooted, bootloader locked, Knox intact**.
+SELinux enforcing, **unrooted, bootloader locked, Knox intact**, with a Jieli
+`3654:4a55` UAC1 DAC. This is the only verified hardware combination.
 
 - `snd-usb-audio` binds all three audio interfaces of the Jieli as soon as it
   is plugged in (confirmed in sysfs).
@@ -99,6 +132,9 @@ SELinux enforcing, **unrooted, bootloader locked, Knox intact**.
   opening the device and running it, `/sys/bus/usb/drivers/snd-usb-audio/`
   contains no interface links at all, and the engine streams 48 kHz / 24-bit
   isochronous URBs with no errors.
+
+UAC2 DACs and the analog headphone jack are not supported. The wired inline
+headset remote is unverified.
 
 ## Android: taking the interface from the kernel
 
@@ -157,13 +193,27 @@ gcc -O2 -D_GNU_SOURCE -o usbplay usbplay.c \
 ```
 
 Android: open `android/` in Android Studio and build. Requires NDK and CMake.
+`minSdk` is 26, `targetSdk` and `compileSdk` are 36. ABIs are `arm64-v8a`,
+`armeabi-v7a` and `x86_64`.
+
+Unit tests and a debug build:
+
+```bash
+cd android
+./gradlew testDebugUnitTest
+./gradlew assembleDebug
+```
+
+Release signing reads `android/keystore.properties` (gitignored) for
+`storeFile`, `storePassword`, `keyAlias` and `keyPassword`. If the file is
+absent, the build silently falls back to the debug key.
 
 ## Known issues
 
-- **Release signing.** `android/app/build.gradle.kts` reads
-  `android/keystore.properties` (gitignored) and falls back to the debug key
-  when it is absent, so the current v1.0.0 APK is debug-signed. Add the
-  properties file and rebuild to produce a proper release signature.
+- **Release signing.** Release builds read `android/keystore.properties`
+  (gitignored) and silently fall back to the debug key when it is absent. The
+  published v1.1.0 APK is signed with a new release key; see the install note
+  above.
 - **Mixer mode depends on the kernel driver.** Phone/speaker playback always
   works, but routing the mixer path through the DAC needs `snd-usb-audio`
   bound; if it is not, audio goes to the speaker until the DAC is replugged.
@@ -177,7 +227,18 @@ Android: open `android/` in Android Studio and build. Requires NDK and CMake.
 
 ## Next
 
-- Per-track alt-setting selection (16-bit only when the source is 16-bit).
-- Proper release keystore in CI, signed `v1.x` artifacts.
-- Scroll/performance profiling with Perfetto.
-- Widget and Android Auto surface.
+- 1.2.0 UI overhaul: design tokens, dock and Now Playing redesign.
+- Playlists, multi-select and a folder browser.
+- UAC2 and analog-jack output, future and unscheduled.
+
+## License
+
+VCHiFiMP is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE). Vendored
+libsamplerate 0.2.2 is BSD-2-Clause and keeps its
+[COPYING](android/app/src/main/cpp/libsamplerate/COPYING).
+
+The USB claim sequence draws on
+[ostrichbat2k/libusbdac](https://github.com/ostrichbat2k/libusbdac) (GPL-3.0)
+and [unom-io/usbfs-iso](https://github.com/unom-io/usbfs-iso) (Apache-2.0).
+The implementation here is independent; no code was copied. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
