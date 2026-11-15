@@ -114,7 +114,7 @@ fun EqScreen(
                 Column(Modifier.weight(1f)) {
                     Text("Equalizer", style = MaterialTheme.typography.headlineMedium)
                     Text(
-                        "Parametric EQ · USB DAC path",
+                        "Parametric EQ",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -419,7 +419,7 @@ fun EqScreen(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "DSP applies to the USB DAC path only; mixer output is untouched.",
+                "EQ applies to USB DAC, phone speaker and headphone jack.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
