@@ -13,8 +13,9 @@ yours to set.
 VCHiFiMP takes the other road. It opens the USB device itself, selects the
 UAC1 alt setting for the exact format it wants, and streams PCM as
 isochronous USB transfers, one packet per millisecond. No ALSA, no PipeWire,
-no AudioFlinger, no mixer. Volume is applied by us in floating point; dither is
-added only when the signal is actually modified.
+no AudioFlinger, no mixer. Volume is applied by us in floating point, or by the
+DAC's hardware volume when enabled; dither is added only when the signal is
+actually modified.
 
 With a bit-perfect path, the DAC receives exactly the samples we decoded, at
 exactly the rate it asked for.
@@ -29,7 +30,7 @@ Core:
   interface/alt setting (S16 or S24_3LE, 44.1/48/96 kHz). Output depth defaults
   to **Auto**, which follows each track's source: 16-bit files take alt 1,
   24-bit files take alt 2, with an in-place `uae_switch_format` when the depth
-  changes between tracks.
+  changes between tracks. In-place alt switching is verified on the Jieli.
 - Streams with a 12-URB pipeline of 8 one-millisecond isochronous packets.
 - Supports fractional packet sizes, so 44.1 kHz works as alternating
   44/45-frame packets instead of being resampled.
@@ -59,7 +60,8 @@ Android app (`v1.1.0`):
 - Signal-path panel and bit-perfect indicator. The indicator is green only with
   exclusive USB, no DSP, no resampling, no bit-depth reduction, and hardware
   volume or software volume at 100%; otherwise it is amber PROCESSED with
-  reasons.
+  reasons. Forcing 16-bit output on a 24-bit source shows amber PROCESSED with
+  'Bit-depth reduction'.
 - Resume position and full-queue resume.
 - USB detach keeps the playing track and pauses on the audible frame; the DAC
   is re-claimed automatically when it comes back.
@@ -106,7 +108,7 @@ own clocking.
 
 ## Status
 
-`v1.1.0` — Android app and Linux reference player both working; no root
+`v1.1.0` — Android app working; the Linux reference player builds; no root
 required (see the claim sequence). The Linux tooling remains playback and
 measurement only; DSP and EQ are Android features. Release builds are minified
 with R8 and shrink resources (under 6 MB APK versus about 20 MB debug).
@@ -220,10 +222,8 @@ absent, the build silently falls back to the debug key.
   The exclusive/bit-perfect path is unaffected.
 - **Auto depth depends on metadata.** When neither the library scan nor
   `MediaExtractor` reports a bit depth, the track falls back to 24-bit.
-- **24-bit ↔ 16-bit alt switching in place** is implemented (gapless breaks
-  into `uae_switch_format`) and verified on the Jieli DAC: `uae: switched to
-  44100 Hz / 16-bit (alt 1, maxpkt 384)` after a 24-bit track, and back to alt 2
-  / maxpkt 576 on the next 24-bit track, with no engine teardown.
+- **Backup import.** Backup import through the file picker has not been tested
+  on a signed build.
 
 ## Next
 
