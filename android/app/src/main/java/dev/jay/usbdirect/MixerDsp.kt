@@ -16,7 +16,7 @@ class MixerDsp(rate: Int) {
 
     private val lock = Any()
     private var handle: Long = nativeMixerDspCreate(rate.toDouble())
-    private var scratch = FloatArray(PREROLL * CHANNELS)
+    private val block = MixerBlock(CHANNELS)
 
     /**
      * True while the native rack must run. It stays true through the 480-frame
@@ -78,14 +78,12 @@ class MixerDsp(rate: Int) {
             val h = handle
             if (h == 0L || !engaged) return false
 
-            val n = frames * CHANNELS
-            if (scratch.size < n) scratch = FloatArray(n)
-            buf.position(0)
-            buf.get(scratch, 0, n)
-            val active = nativeMixerDspProcess(h, scratch, frames, CHANNELS)
-            buf.put(0, scratch, 0, n)
-
-            if (active == 0) engaged = false
+            // Absolute bulk access only: the caller's shared buffer position,
+            // limit and byte order must be exactly as received.
+            val active = block.process(buf, frames) { s, f, c ->
+                nativeMixerDspProcess(h, s, f, c)
+            }
+            if (!active) engaged = false
             return true
         }
     }
@@ -101,9 +99,6 @@ class MixerDsp(rate: Int) {
 
     private companion object {
         const val CHANNELS = 2
-
-        /** Covers OUT_MAX (6144) frames without allocating per block. */
-        const val PREROLL = 6144
 
         init {
             System.loadLibrary("usbdirect")
