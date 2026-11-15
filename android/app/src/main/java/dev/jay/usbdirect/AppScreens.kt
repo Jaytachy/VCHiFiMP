@@ -1288,6 +1288,7 @@ fun OutputScreen(
     onHardwareVolume: (Boolean) -> Unit,
     dynamicColors: Boolean = true,
     mixerRouteMissing: Boolean = false,
+    mixerByUser: Boolean = false,
     dspEnabled: Boolean = false,
     dspConfig: DspConfig = DspConfig(),
     dspPresetName: String = "Flat",
@@ -1400,6 +1401,15 @@ fun OutputScreen(
                     "mixer output may go to the phone speaker until it is.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.tertiary
+                )
+            }
+
+            if (dacName.isNotEmpty() && mixerByUser) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Exclusive DAC is off (using phone mixer)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFFFD27A)
                 )
             }
 

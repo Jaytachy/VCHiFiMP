@@ -53,6 +53,8 @@ class MainActivity : ComponentActivity() {
     private var dacName by mutableStateOf("")
     private var volume by mutableStateOf(0.2f)
     private var exclusive by mutableStateOf(true)
+    /** Saved user choice: true = stay on the phone mixer even if a DAC is present. */
+    private var mixerByUser by mutableStateOf(false)
     private var hardwareVolume by mutableStateOf(false)
     private var tab by mutableStateOf(Tab.HOME)
     private var openAlbum by mutableStateOf<LibAlbum?>(null)
@@ -108,6 +110,7 @@ class MainActivity : ComponentActivity() {
             val svc = (binder as PlaybackService.LocalBinder).service()
             service = svc
             svc.setVolume(volume)
+            svc.setMixerByUser(mixerByUser)
             svc.setExclusive(exclusive)
             svc.setHardwareVolume(hardwareVolume)
             svc.setOutputBits(outputBits)
@@ -127,6 +130,11 @@ class MainActivity : ComponentActivity() {
             val dac = audioDevice()
             if (dac != null && usbManager.hasPermission(dac)) {
                 svc.setDevice(dac, outputBits, volume)
+                // A permitted DAC on startup is only bypassed when the user
+                // explicitly saved a mixer choice. Stale runtime state must not
+                // keep the queue on the mixer.
+                exclusive = !mixerByUser
+                svc.setExclusive(exclusive)
                 dacName = dac.productName ?: "USB DAC"
             } else if (dac != null) {
                 // DAC present but no grant yet (fresh install / replug): ask now
@@ -283,6 +291,9 @@ class MainActivity : ComponentActivity() {
             if (p != null) {
                 pendingPlay = null
                 service?.setDevice(d, outputBits, volume)
+                exclusive = !mixerByUser
+                service?.setExclusive(exclusive)
+                service?.setMixerByUser(mixerByUser)
                 service?.setQueue(p.first, p.second)
             } else {
                 attachDac(d)
@@ -344,7 +355,8 @@ class MainActivity : ComponentActivity() {
         keepScreenOn = getPreferences(MODE_PRIVATE).getBoolean("keepScreenOn", false)
         smartAutoplay = getPreferences(MODE_PRIVATE).getBoolean("smartAutoplay", true)
         swipeUpMini = getPreferences(MODE_PRIVATE).getBoolean("swipeUpMini", true)
-        exclusive = getPreferences(MODE_PRIVATE).getBoolean("exclusive", true)
+        mixerByUser = getPreferences(MODE_PRIVATE).getBoolean("mixerByUser", false)
+        exclusive = !mixerByUser
         hardwareVolume = getPreferences(MODE_PRIVATE).getBoolean("hwvol", false)
         if (intent?.getBooleanExtra("mixer", false) == true) exclusive = false
 
@@ -723,11 +735,14 @@ class MainActivity : ComponentActivity() {
                                     transportFlow = service?.state,
                                     dacName = dacName,
                                     exclusive = exclusive,
+                                    mixerByUser = mixerByUser,
                                     onExclusive = {
                                         exclusive = it
+                                        mixerByUser = !it
                                         service?.setExclusive(it)
+                                        service?.setMixerByUser(!it)
                                         getPreferences(MODE_PRIVATE).edit()
-                                            .putBoolean("exclusive", it).apply()
+                                            .putBoolean("mixerByUser", !it).apply()
                                     },
                                     volume = volume,
                                     onVolume = {
@@ -1015,7 +1030,7 @@ class MainActivity : ComponentActivity() {
             put("sleepMinutes", sleepMinutes)
             put("volume", volume.toDouble())
             put("hardwareVolume", hardwareVolume)
-            put("exclusive", exclusive)
+            put("mixerByUser", mixerByUser)
             put("dspEnabled", dspEnabled)
             put("dspPreampDb", dspConfig.preampDb)
             put("dspAutoHeadroom", dspConfig.autoHeadroom)
@@ -1066,7 +1081,11 @@ class MainActivity : ComponentActivity() {
         sleepMinutes = int("sleepMinutes", sleepMinutes)
         volume = if (st.has("volume")) st.getDouble("volume").toFloat() else volume
         hardwareVolume = bool("hardwareVolume", hardwareVolume)
-        exclusive = bool("exclusive", exclusive)
+        // Old backups predate the separate mixer choice. Ignore their
+        // exclusive=false value so a stale fallback cannot suppress DAC claim.
+        val hasMixerChoice = st.has("mixerByUser")
+        mixerByUser = if (hasMixerChoice) st.optBoolean("mixerByUser", false) else false
+        exclusive = !mixerByUser
 
         // Additive: old backups simply have none of these keys.
         dspEnabled = bool("dspEnabled", dspEnabled)
@@ -1109,7 +1128,7 @@ class MainActivity : ComponentActivity() {
             putStringSet("excludedFolders", excludedFolders)
             putFloat("volume", volume)
             putBoolean("hwvol", hardwareVolume)
-            putBoolean("exclusive", exclusive)
+            putBoolean("mixerByUser", mixerByUser)
             putBoolean("dspEnabled", dspEnabled)
             putFloat("dspPreampDb", dspConfig.preampDb.toFloat())
             putBoolean("dspAutoHeadroom", dspConfig.autoHeadroom)
@@ -1129,6 +1148,7 @@ class MainActivity : ComponentActivity() {
             setVolume(volume)
             setHardwareVolume(hardwareVolume)
             setExclusive(exclusive)
+            setMixerByUser(mixerByUser)
             setSleepTimer(sleepMinutes)
             player.setDspConfig(dspConfig)
             player.setDspEnabled(dspEnabled)
@@ -1251,13 +1271,14 @@ class MainActivity : ComponentActivity() {
         service?.setQueue(shuffled, 0)
     }
 
-    /** Point the service at a DAC when there is a usable one, else at the mixer. */
+    /** Point the service at the selected sink without overriding a saved mixer choice. */
     private fun routeTo(d: UsbDevice?) {
+        service?.setMixerByUser(mixerByUser)
         if (d != null) {
             dacName = d.productName ?: "USB DAC"
-            exclusive = true
+            exclusive = !mixerByUser
             service?.setDevice(d, outputBits, volume)
-            service?.setExclusive(true)
+            service?.setExclusive(exclusive)
         } else {
             dacName = ""
             exclusive = false
@@ -1272,11 +1293,17 @@ class MainActivity : ComponentActivity() {
 
     private fun attachDac(d: UsbDevice) {
         dacName = d.productName ?: "USB DAC"
-        exclusive = true
         val wasPaused = service?.state?.value?.paused == true
         service?.setDevice(d, outputBits, volume)
+        service?.setMixerByUser(mixerByUser)
+        if (mixerByUser) {
+            exclusive = false
+            service?.setExclusive(false)
+            Log.i("VCProbe", "DAC attached; keeping user mixer choice")
+            return
+        }
+        exclusive = true
         service?.setExclusive(true)
-        getPreferences(MODE_PRIVATE).edit().putBoolean("exclusive", true).apply()
         Log.i("VCProbe", "DAC attached: $dacName (autoPlay=$autoPlayDac wasPaused=$wasPaused)")
         if (autoPlayDac && wasPaused) {
             android.os.Handler(android.os.Looper.getMainLooper())

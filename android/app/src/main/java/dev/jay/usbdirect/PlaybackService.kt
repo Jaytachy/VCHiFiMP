@@ -690,8 +690,12 @@ class PlaybackService : Service() {
     /** true = take the device over (bit-perfect). false = Android's mixer. */
     fun setExclusive(on: Boolean) {
         exclusive = on
-        mixerByUser = !on
         _exclusiveState.value = on
+    }
+
+    /** Persisted user choice. Only the Output toggle should change this. */
+    fun setMixerByUser(on: Boolean) {
+        mixerByUser = on
     }
 
     /** Next track in play order, without committing to it yet. */
