@@ -249,7 +249,6 @@ data class SignalVerdict(val perfect: Boolean, val reasons: List<String>)
 fun signalVerdict(
     exclusive: Boolean,
     dspEnabled: Boolean,
-    ditherOn: Boolean,
     resampled: Boolean,
     hardwareVolume: Boolean,
     volume: Float
@@ -258,9 +257,8 @@ fun signalVerdict(
     if (!exclusive) reasons.add("Mixer")
     if (dspEnabled) reasons.add("EQ")
     if (resampled) reasons.add("Resampled")
-    // TPDF is applied in pack_frames even at digital unity, so it is always
-    // a sample-domain change unless the user disabled dither.
-    if (ditherOn) reasons.add("Dither")
+    // Dither is auto-skipped at unity volume / DSP off / no resample, so it
+    // is not a processed-path reason here.
     if (!hardwareVolume && volume < 0.999f) reasons.add("SW vol")
     return SignalVerdict(reasons.isEmpty(), reasons)
 }

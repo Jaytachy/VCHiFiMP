@@ -255,7 +255,6 @@ fun HomeScreen(
     onPlayTracks: (List<LibTrack>) -> Unit,
     onOpenAlbum: (LibAlbum) -> Unit,
     dspEnabled: Boolean = false,
-    ditherOn: Boolean = true,
     hardwareVolume: Boolean = false,
     volume: Float = 1f
 ) {
@@ -267,7 +266,7 @@ fun HomeScreen(
             if (rateLabel.isNotEmpty()) "$dacName \u2022 $rateLabel" else dacName
         } else "Phone audio"
     val verdict = signalVerdict(
-        exclusive, dspEnabled, ditherOn, transport.resampled,
+        exclusive, dspEnabled, transport.resampled,
         hardwareVolume, volume
     )
     val bitPerfect = transport.playing && transport.format.isNotEmpty() && verdict.perfect
@@ -1290,7 +1289,6 @@ fun OutputScreen(
     dspEnabled: Boolean = false,
     dspConfig: DspConfig = DspConfig(),
     dspPresetName: String = "Flat",
-    ditherOn: Boolean = true,
     onDspEnabled: (Boolean) -> Unit = {},
     onOpenEq: () -> Unit = {}
 ) {
@@ -1312,7 +1310,10 @@ fun OutputScreen(
         }
     }
 
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(bottom = 200.dp)
+    ) {
         item {
             Spacer(Modifier.height(22.dp))
             Text("Output", style = MaterialTheme.typography.headlineMedium)
@@ -1320,7 +1321,7 @@ fun OutputScreen(
 
             val streamActive = transport.format.isNotEmpty()
             val verdict = signalVerdict(
-                exclusive, dspEnabled, ditherOn, transport.resampled,
+                exclusive, dspEnabled, transport.resampled,
                 hardwareVolume, volume
             )
             val perfect = streamActive && verdict.perfect
@@ -1705,7 +1706,7 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(8.dp))
 
-                SwitchRow("TPDF dither", "Triangular dither in the native packer", dither, onDither)
+                SwitchRow("TPDF dither", "Applied automatically only when samples are modified", dither, onDither)
                 HorizontalDivider()
                 SwitchRow("Gapless playback", "Continue into the next track when the format matches", gapless, onGapless)
                 HorizontalDivider()

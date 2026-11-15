@@ -59,6 +59,8 @@ class UsbDirectPlayer(private val context: Context) {
     /** DSP rack state survives engine restarts and track changes. */
     @Volatile private var dspConfig = DspConfig()
     @Volatile private var dspEnabled = false
+    /** True when PcmSink is using libsamplerate for this stream. */
+    @Volatile private var resampled = false
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -84,6 +86,7 @@ class UsbDirectPlayer(private val context: Context) {
         currentOutBits = bits
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
+        resampled = src != dev
         onFormat?.invoke(dev, bits)
         Log.i("VCProbe", "source=" + src + " Hz -> device=" + dev + " Hz" +
                 if (src == dev) " (bit-perfect path, no resample)" else " (resampled)")
@@ -193,8 +196,10 @@ class UsbDirectPlayer(private val context: Context) {
     }
 
     /** Plays a 1 kHz tone straight from native, no decoding involved. */
-    fun startTone(device: UsbDevice, rate: Int, bits: Int, volume: Float, seconds: Int) =
+    fun startTone(device: UsbDevice, rate: Int, bits: Int, volume: Float, seconds: Int) {
+        resampled = false
         startInternal(device, rate, bits, volume) { eng -> playTone(eng, rate, seconds) }
+    }
 
     private fun startInternal(device: UsbDevice, rate: Int, bits: Int, volume: Float,
                               body: (UsbAudioEngine) -> Unit) {
@@ -220,6 +225,7 @@ class UsbDirectPlayer(private val context: Context) {
                 // the Kotlin-side config again so the two never drift.
                 live.setDspConfig(dspConfig)
                 live.setDspEnabled(dspEnabled)
+                live.setResampled(resampled)
                 running = true
                 thread = Thread {
                     var completed = false
@@ -268,6 +274,7 @@ class UsbDirectPlayer(private val context: Context) {
                 eng.setDither(dither)
                 eng.setDspConfig(dspConfig)
                 eng.setDspEnabled(dspEnabled)
+                eng.setResampled(resampled)
 
                 analyzer.start()
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")

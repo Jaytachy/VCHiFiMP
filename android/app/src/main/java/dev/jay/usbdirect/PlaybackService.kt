@@ -37,7 +37,10 @@ data class LastPlayed(
     val durationMs: Long,
     val codec: String,
     /** Exact resume point; 0 on entries written by older builds. */
-    val positionMs: Long = 0L
+    val positionMs: Long = 0L,
+    /** Queue snapshot for album-contiguous resume; empty on older entries. */
+    val queue: List<Track> = emptyList(),
+    val queueIndex: Int = -1
 )
 
 data class Track(
@@ -337,14 +340,36 @@ class PlaybackService : Service() {
         )
     }
 
+    private fun trackToJson(t: Track): org.json.JSONObject = org.json.JSONObject().apply {
+        put("uri", t.uri.toString()); put("title", t.title)
+        put("durationMs", t.durationMs); put("artist", t.artist)
+        put("album", t.album); put("codec", t.codec)
+        put("bitDepth", t.bitDepth); put("sampleRate", t.sampleRate)
+    }
+
+    private fun trackFromJson(o: org.json.JSONObject?): Track? {
+        if (o == null) return null
+        val uri = o.optString("uri")
+        if (uri.isEmpty()) return null
+        return Track(
+            Uri.parse(uri), o.optString("title"), o.optLong("durationMs"),
+            o.optString("artist"), o.optString("album"), o.optString("codec"),
+            o.optInt("bitDepth"), o.optInt("sampleRate")
+        )
+    }
+
     private fun loadLastPlayed() {
         val raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("lastPlayed", null) ?: return
         runCatching {
             val o = org.json.JSONObject(raw)
+            val qarr = o.optJSONArray("queue")
+            val q = if (qarr != null) {
+                (0 until qarr.length()).mapNotNull { trackFromJson(qarr.optJSONObject(it)) }
+            } else emptyList()
             _lastPlayed.value = LastPlayed(
                 o.getString("uri"), o.getString("title"), o.optString("artist"),
                 o.optString("album"), o.optLong("durationMs"), o.optString("codec"),
-                o.optLong("positionMs")
+                o.optLong("positionMs"), q, o.optInt("queueIndex", -1)
             )
         }
     }
@@ -353,12 +378,17 @@ class PlaybackService : Service() {
         put("uri", lp.uri); put("title", lp.title); put("artist", lp.artist)
         put("album", lp.album); put("durationMs", lp.durationMs); put("codec", lp.codec)
         put("positionMs", lp.positionMs)
+        put("queueIndex", lp.queueIndex)
+        val arr = org.json.JSONArray()
+        for (t in lp.queue) arr.put(trackToJson(t))
+        put("queue", arr)
     }.toString()
 
     private fun saveLastPlayed(lp: LastPlayed) {
-        _lastPlayed.value = lp
+        val full = lp.copy(queue = queue.toList(), queueIndex = index)
+        _lastPlayed.value = full
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putString("lastPlayed", lastPlayedJson(lp)).apply()
+            .putString("lastPlayed", lastPlayedJson(full)).apply()
     }
 
     /**
@@ -380,6 +410,11 @@ class PlaybackService : Service() {
             lp.positionMs.coerceIn(0L, (lp.durationMs - 1000L).coerceAtLeast(0L))
         } else {
             lp.positionMs.coerceAtLeast(0L)
+        }
+        if (lp.queue.isNotEmpty()) {
+            val idx = lp.queueIndex.coerceIn(0, lp.queue.lastIndex)
+            setQueue(lp.queue, idx, startMs)
+            return
         }
         setQueue(
             listOf(Track(Uri.parse(lp.uri), lp.title, lp.durationMs, lp.artist, lp.album, lp.codec)),

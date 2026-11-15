@@ -48,6 +48,11 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetDither(handle, on)
     }
 
+    /** Tell the packer whether the producer is resampling into this rate. */
+    fun setResampled(on: Boolean) {
+        if (handle != 0L) nativeSetResampled(handle, on)
+    }
+
     /** Enable/disable the native biquad rack (ramped wet/dry in C). */
     fun setDspEnabled(on: Boolean) {
         if (handle != 0L) nativeDspEnable(handle, on)
@@ -120,6 +125,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetVolume(h: Long, v: Float)
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeSetDither(h: Long, on: Boolean)
+    private external fun nativeSetResampled(h: Long, on: Boolean)
     private external fun nativeDspEnable(h: Long, on: Boolean)
     private external fun nativeDspSetBands(
         h: Long, params: DoubleArray, nbands: Int,

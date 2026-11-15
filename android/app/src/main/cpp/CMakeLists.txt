@@ -15,6 +15,7 @@ set_target_properties(samplerate PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON
 add_library(usbdirect SHARED
         usb_audio_engine.c
         uae_dsp.c
+        uae_pack.c
         jni_bridge.c
         resampler.c
         resampler_bridge.c)

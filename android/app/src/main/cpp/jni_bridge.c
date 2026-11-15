@@ -130,6 +130,13 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetDither(JNIEnv *env, jobject thiz,
 }
 
 JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetResampled(JNIEnv *env, jobject thiz,
+                                                         jlong h, jboolean on)
+{
+    uae_set_resampled((struct uae *)(intptr_t)h, on ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeSetPpm(JNIEnv *env, jobject thiz,
                                                    jlong h, jfloat ppm)
 {

@@ -547,7 +547,6 @@ class MainActivity : ComponentActivity() {
                             },
                             exclusive = exclusive,
                             dspEnabled = dspEnabled,
-                            ditherOn = dither,
                             hardwareVolume = hardwareVolume
                         )
                         return@Surface
@@ -697,7 +696,6 @@ class MainActivity : ComponentActivity() {
                                     onPlayTracks = { list -> if (list.isNotEmpty()) playList(list, 0) },
                                     onOpenAlbum = { openAlbum = it },
                                     dspEnabled = dspEnabled,
-                                    ditherOn = dither,
                                     hardwareVolume = hardwareVolume,
                                     volume = volume
                                 )
@@ -753,7 +751,6 @@ class MainActivity : ComponentActivity() {
                                     dspEnabled = dspEnabled,
                                     dspConfig = dspConfig,
                                     dspPresetName = dspPresetName,
-                                    ditherOn = dither,
                                     onDspEnabled = { applyDspEnabled(it) },
                                     onOpenEq = { showEq = true }
                                 )

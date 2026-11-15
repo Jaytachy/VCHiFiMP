@@ -67,12 +67,11 @@ fun NowPlayingScreen(
     dynamicColors: Boolean = true,
     exclusive: Boolean = true,
     dspEnabled: Boolean = false,
-    ditherOn: Boolean = true,
     hardwareVolume: Boolean = false
 ) {
     val transport = rememberTransport(transportFlow)
     val verdict = signalVerdict(
-        exclusive, dspEnabled, ditherOn, transport.resampled,
+        exclusive, dspEnabled, transport.resampled,
         hardwareVolume, volume
     )
 

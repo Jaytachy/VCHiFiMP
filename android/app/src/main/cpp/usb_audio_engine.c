@@ -26,6 +26,7 @@
 
 #include "usb_audio_engine.h"
 #include "uae_dsp.h"
+#include "uae_pack.h"
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -87,7 +88,8 @@ struct uae {
     size_t head, tail, filled;
 
     float volume;
-    int dither;             /* TPDF dither on/off (default on) */
+    int dither;             /* user master allow for TPDF dither */
+    volatile int resampled; /* producer is using libsamplerate */
     double ppm;
     uint64_t rendered;      /* frames packed since open */
     volatile uint64_t frames_done;  /* frames in URBs the kernel has completed */
@@ -135,13 +137,6 @@ static uint64_t clock_gettime_ns(void)
 }
 
 static uint32_t rng_state = 0x2545f491u;
-static inline float frand(void)
-{
-    rng_state ^= rng_state << 13;
-    rng_state ^= rng_state >> 17;
-    rng_state ^= rng_state << 5;
-    return (float)(rng_state & 0x00ffffffu) / 16777216.0f;
-}
 
 static void set_err(struct uae *e, const char *fmt, ...)
 {
@@ -359,7 +354,8 @@ static size_t ring_read(struct uae *e, float *dst, size_t frames)
 
 /* --------------------------------------------------------- packing */
 
-static void pack_frames(struct uae *e, unsigned char *dst, const float *src, int n)
+static void pack_frames(struct uae *e, unsigned char *dst, const float *src,
+                        int n, int dither)
 {
     const int ss = e->bpf / e->channels;   /* subframe bytes */
     const float fade_len = (float)(e->rate / 50);   /* 20 ms */
@@ -379,22 +375,7 @@ static void pack_frames(struct uae *e, unsigned char *dst, const float *src, int
         for (int c = 0; c < e->channels; c++) {
             float v = src[f * e->channels + c] * e->volume * gain;
             unsigned char *p = dst + (f * e->channels + c) * ss;
-            if (ss == 2) {
-                double d = e->dither ? v + (frand() - frand()) / 32768.0 : v;
-                long x = lrint(d * 32767.0);
-                if (x > 32767) x = 32767;
-                if (x < -32768) x = -32768;
-                int16_t s = (int16_t)x;
-                memcpy(p, &s, 2);
-            } else {
-                double d = e->dither ? v + (frand() - frand()) / 8388608.0 : v;
-                long x = lrint(d * 8388607.0);
-                if (x > 8388607) x = 8388607;
-                if (x < -8388608) x = -8388608;
-                p[0] = (unsigned char)(x & 0xff);
-                p[1] = (unsigned char)((x >> 8) & 0xff);
-                p[2] = (unsigned char)((x >> 16) & 0xff);
-            }
+            uae_pack_sample(v, p, ss, dither, &rng_state);
         }
     }
 }
@@ -409,10 +390,16 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
     /* One coefficient snapshot per URB. While disabled this is a single
      * atomic load; no DSP code runs on the sample path. */
     struct uae_dsp_snapshot dsp_snap;
-    int dsp_on = e->channels == 2 &&
+    int dsp_enabled =
         atomic_load_explicit(&e->dsp.enabled, memory_order_relaxed) != 0;
+    int dsp_on = e->channels == 2 && dsp_enabled;
     if (dsp_on && !uae_dsp_read_snapshot(&e->dsp, &dsp_snap))
         dsp_on = 0;
+
+    /* One decision per URB: dither is only useful when a previous stage
+     * actually changed the sample (volume, DSP or resampling). */
+    int dither_urb = uae_dither_needed(
+        e->dither, e->volume, dsp_enabled, e->resampled);
 
     for (int k = 0; k < PKTS_PER_URB; k++) {
         *acc += fpm;
@@ -460,7 +447,7 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
 
         if (dsp_on)
             uae_dsp_process(&e->dsp, &dsp_snap, tmp, n);
-        pack_frames(e, c->buf + off, tmp, n);
+        pack_frames(e, c->buf + off, tmp, n, dither_urb);
         c->pkt[k].length = (unsigned int)(n * e->bpf);
         off += n * e->bpf;
     }
@@ -804,6 +791,11 @@ int uae_write(struct uae *e, const float *src, int frames)
 void uae_set_dither(struct uae *e, int on)
 {
     if (e) e->dither = on ? 1 : 0;
+}
+
+void uae_set_resampled(struct uae *e, int on)
+{
+    if (e) e->resampled = on ? 1 : 0;
 }
 
 void uae_set_volume(struct uae *e, float v)

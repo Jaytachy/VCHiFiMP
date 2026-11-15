@@ -102,7 +102,7 @@ fun EqScreen(
 
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp)
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 200.dp)
     ) {
         item {
             Spacer(Modifier.height(18.dp))
@@ -336,6 +336,14 @@ fun EqScreen(
                         Switch(
                             checked = config.autoHeadroom,
                             onCheckedChange = { onConfig(config.copy(autoHeadroom = it)) }
+                        )
+                    }
+                    if (!config.autoHeadroom && config.preampDb + headroom > 0.0) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "Clipping possible: boost exceeds 0 dBFS",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFFD27A)
                         )
                     }
                 }
