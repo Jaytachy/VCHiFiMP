@@ -44,7 +44,7 @@ Core:
   ring, metadata flips on the audible sample boundary.
 - UAC Feature Unit hardware volume, with float gain locked at unity when active.
 
-Android app (`v1.1.0`):
+Android app (`v1.1.1`):
 
 - SAF library scan with JSON cache, tags, Songs/Albums/Artists, search, sort,
   favourites, queue sheet, shuffle and 3-state repeat.
@@ -66,7 +66,8 @@ Android app (`v1.1.0`):
 - USB detach keeps the playing track and pauses on the audible frame; the DAC
   is re-claimed automatically when it comes back.
 - Cold-start DAC claim, so a connected DAC is used instead of the phone mixer.
-- Mixer playback is labelled "Android mixer, not bit-perfect".
+- Mixer playback is labelled "Android mixer, not bit-perfect". The choice to
+  use the phone mixer is saved separately and shown on the Output tab.
 - Foreground `PlaybackService` with MediaSession, lock screen and media keys;
   notification controls for Previous, Play/Pause, Next and Stop.
 - Output tab with live pipeline telemetry (URBs, underruns, jitter, ring fill),
@@ -108,16 +109,17 @@ own clocking.
 
 ## Status
 
-`v1.1.0` — Android app working; the Linux reference player builds; no root
+`v1.1.1` — Android app working; the Linux reference player builds; no root
 required (see the claim sequence). The Linux tooling remains playback and
 measurement only; DSP and EQ are Android features. Release builds are minified
 with R8 and shrink resources (under 6 MB APK versus about 20 MB debug).
 
-## Installing v1.1.0
+## Installing v1.1.1
 
-v1.1.0 is signed with a new key and cannot install over earlier debug-signed
-builds. Export a backup in Settings, uninstall the old app, install v1.1.0,
-then import the backup.
+The package name is now `dev.jay.vchifimp`, so v1.1.1 installs as a **new app
+alongside** an older `dev.jay.usbdirect` build. In the old app, export a backup
+in Settings; install v1.1.1, grant USB permission, import that backup, then
+uninstall the old app.
 
 ## Verified on hardware
 
@@ -134,6 +136,8 @@ SELinux enforcing, **unrooted, bootloader locked, Knox intact**, with a Jieli
   opening the device and running it, `/sys/bus/usb/drivers/snd-usb-audio/`
   contains no interface links at all, and the engine streams 48 kHz / 24-bit
   isochronous URBs with no errors.
+- Cold-start DAC claim and post-replug reclaim verified on the signed build
+  with the A54 + Jieli.
 
 UAC2 DACs and the analog headphone jack are not supported. The wired inline
 headset remote is unverified.
@@ -214,7 +218,7 @@ absent, the build silently falls back to the debug key.
 
 - **Release signing.** Release builds read `android/keystore.properties`
   (gitignored) and silently fall back to the debug key when it is absent. The
-  published v1.1.0 APK is signed with a new release key; see the install note
+  published v1.1.1 APK is signed with the release key; see the install note
   above.
 - **Mixer mode depends on the kernel driver.** Phone/speaker playback always
   works, but routing the mixer path through the DAC needs `snd-usb-audio`
