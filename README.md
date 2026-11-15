@@ -222,8 +222,6 @@ absent, the build silently falls back to the debug key.
   The exclusive/bit-perfect path is unaffected.
 - **Auto depth depends on metadata.** When neither the library scan nor
   `MediaExtractor` reports a bit depth, the track falls back to 24-bit.
-- **Backup import.** Backup import through the file picker has not been tested
-  on a signed build.
 
 ## Next
 
