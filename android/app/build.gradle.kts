@@ -16,8 +16,8 @@ android {
         applicationId = "dev.jay.usbdirect"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.1.0-beta.1"
+        versionCode = 5
+        versionName = "1.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
