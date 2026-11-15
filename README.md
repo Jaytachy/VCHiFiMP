@@ -82,7 +82,7 @@ Android app (`v1.1.1`):
 ```
 linux/     reference player and measurement tools - the fast debug loop
 android/   Kotlin + Compose app with the same C engine behind JNI
-tests/     test material
+tests/     local test material (not included in the repo)
 ```
 
 ## Requirements
