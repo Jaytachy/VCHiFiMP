@@ -63,6 +63,9 @@ class UsbDirectPlayer(private val context: Context) {
     /** DSP rack state survives engine restarts and track changes. */
     @Volatile private var dspConfig = DspConfig()
     @Volatile private var dspEnabled = false
+    /** Second rack owned by the mixer sink; null while no mixer sink is live. */
+    @Volatile private var mixerDsp: MixerDsp? = null
+    private val mixerDspLock = Any()
     /** True when PcmSink is using libsamplerate for this stream. */
     @Volatile private var resampled = false
     /** Decoded source depth; unknown/float sources are treated as 24-bit. */
@@ -119,7 +122,18 @@ class UsbDirectPlayer(private val context: Context) {
         running = true
         thread = Thread {
             var track: AudioTrack? = null
+            var eq: MixerDsp? = null
             try {
+                // Mixer/headphone EQ lives with the sink. A fresh instance per
+                // start gives clean filter state and coefficients for this rate.
+                val d = MixerDsp(rate)
+                eq = d
+                synchronized(mixerDspLock) {
+                    mixerDsp?.close()
+                    mixerDsp = d
+                    d.setConfig(dspConfig)
+                    d.setEnabled(dspEnabled)
+                }
                 val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 // Prefer the USB DAC when one is present; otherwise let the
                 // platform pick (speaker, Bluetooth, wired) so the app is still
@@ -150,7 +164,7 @@ class UsbDirectPlayer(private val context: Context) {
                 analyzer.start()
                 Log.i("VCProbe", "mixer sink open: " + rate + " Hz")
                 onInfo?.invoke("mixer: ${rate} Hz")
-                decodeLoop(uri, MixerTarget(track) { mixerVolume }, rate, startMs)
+                decodeLoop(uri, MixerTarget(track, { mixerVolume }, d), rate, startMs)
             } catch (_: PlaybackAborted) {
                 // seek/stop expected this writer to leave
             } catch (t: Throwable) {
@@ -159,6 +173,10 @@ class UsbDirectPlayer(private val context: Context) {
             } finally {
                 runCatching { track?.stop() }
                 runCatching { track?.release() }
+                synchronized(mixerDspLock) {
+                    if (mixerDsp === eq) mixerDsp = null
+                }
+                eq?.close()
                 running = false
                 if (gen == session) onFinished?.invoke()
             }
@@ -378,15 +396,18 @@ class UsbDirectPlayer(private val context: Context) {
     fun setDspConfig(config: DspConfig) {
         dspConfig = config
         engine?.setDspConfig(config)
+        synchronized(mixerDspLock) { mixerDsp?.setConfig(config) }
     }
 
     fun setDspEnabled(on: Boolean) {
         dspEnabled = on
         engine?.setDspEnabled(on)
+        synchronized(mixerDspLock) { mixerDsp?.setEnabled(on) }
     }
 
     fun resetDsp() {
         engine?.resetDsp()
+        synchronized(mixerDspLock) { mixerDsp?.reset() }
     }
 
     fun setVolume(v: Float) {
@@ -615,6 +636,8 @@ class UsbDirectPlayer(private val context: Context) {
         fun setSourceBits(bits: Int) {}
         /** True after stop/seek/close; a write failure is expected, not detach. */
         fun isAborting(): Boolean = false
+        /** Clear filter history at a gapless track boundary (mixer only). */
+        fun resetDsp() {}
     }
 
     private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
@@ -629,7 +652,8 @@ class UsbDirectPlayer(private val context: Context) {
 
     private class MixerTarget(
         private val track: AudioTrack,
-        private val volumeProvider: () -> Float
+        private val volumeProvider: () -> Float,
+        private val dsp: MixerDsp
     ) : PcmTarget {
         override fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int): Int {
             val v = volumeProvider()
@@ -637,6 +661,10 @@ class UsbDirectPlayer(private val context: Context) {
                 val lim = buf.limit()
                 for (i in 0 until lim) buf.put(i, buf.get(i) * v)
             }
+            // Mixer EQ runs on this writer thread, on the float block, directly
+            // before the sink. When bypassed engaged is false: no native call,
+            // no buffer copy, no DSP code on the sample path.
+            if (dsp.engaged) dsp.process(buf, frames)
             bytes.position(0)
             bytes.limit(frames * 8)          // 2 ch * 4 bytes
             val written = track.write(bytes, frames * 8, AudioTrack.WRITE_BLOCKING)
@@ -646,6 +674,7 @@ class UsbDirectPlayer(private val context: Context) {
         override fun playedFrames(): Long =
             track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
         override fun bufferedFrames(): Long = 0L
+        override fun resetDsp() = dsp.reset()
     }
 
     private class PcmSink(
@@ -811,6 +840,7 @@ class UsbDirectPlayer(private val context: Context) {
                 val idx = pendingBoundary
                 pendingBoundary = -1
                 target.setSourceBits(pendingBoundaryBits)
+                target.resetDsp()         // new track, clean mixer filter state
                 onBoundary?.invoke(idx)     // metadata flips on the audible sample
             }
             val rel = played - trackStartFrames

@@ -11,6 +11,7 @@
 
 #include "usb_audio_engine.h"
 #include "uae_dsp.h"
+#include "uae_mixer_dsp.h"
 
 static void throw_illegal(JNIEnv *env, const char *msg)
 {
@@ -219,4 +220,86 @@ JNIEXPORT void JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeClose(JNIEnv *env, jobject thiz, jlong h)
 {
     if (h) uae_close((struct uae *)(intptr_t)h);
+}
+
+/* ------------------------------------------------- mixer/headphone EQ --- */
+
+JNIEXPORT jlong JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspCreate(JNIEnv *env, jobject thiz,
+                                                     jdouble rate)
+{
+    /* A failed rack allocation must not break mixer playback: the sink then
+     * simply runs without EQ. */
+    return (jlong)(intptr_t)uae_mixer_dsp_create((double)rate);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspDestroy(JNIEnv *env, jobject thiz,
+                                                      jlong h)
+{
+    if (h) uae_mixer_dsp_destroy((struct uae_mixer_dsp *)(intptr_t)h);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspSetConfig(JNIEnv *env, jobject thiz,
+                                                        jlong h, jdoubleArray params,
+                                                        jint nbands, jdouble preamp_db,
+                                                        jboolean auto_headroom)
+{
+    if (!h || !params) return;
+    int n = nbands;
+    if (n < 0) n = 0;
+    if (n > UAE_DSP_MAX_BANDS) n = UAE_DSP_MAX_BANDS;
+    if ((*env)->GetArrayLength(env, params) < n * 5) return;
+
+    double raw[UAE_DSP_MAX_BANDS * 5];
+    (*env)->GetDoubleArrayRegion(env, params, 0, n * 5, raw);
+    if ((*env)->ExceptionCheck(env)) return;
+
+    struct uae_dsp_band bands[UAE_DSP_MAX_BANDS];
+    memset(bands, 0, sizeof(bands));
+    for (int i = 0; i < n; i++) {
+        const double *p = &raw[i * 5];
+        bands[i].type = (int)p[0];
+        bands[i].fc = p[1];
+        bands[i].q = p[2];
+        bands[i].gain_db = p[3];
+        bands[i].enabled = p[4] != 0.0;
+    }
+    uae_mixer_dsp_set_bands((struct uae_mixer_dsp *)(intptr_t)h, bands, n,
+                            (double)preamp_db, auto_headroom ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspEnable(JNIEnv *env, jobject thiz,
+                                                     jlong h, jboolean on)
+{
+    if (h) uae_mixer_dsp_set_enabled((struct uae_mixer_dsp *)(intptr_t)h,
+                                     on ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspProcess(JNIEnv *env, jobject thiz,
+                                                      jlong h, jfloatArray buf,
+                                                      jint frames, jint channels)
+{
+    if (!h || !buf || frames <= 0) return 0;
+    if (channels != 1 && channels != 2) return 0;
+
+    jsize len = (*env)->GetArrayLength(env, buf);
+    if (len < frames * channels) return 0;
+
+    float *p = (*env)->GetFloatArrayElements(env, buf, NULL);
+    if (!p) return 0;
+    int active = uae_mixer_dsp_process((struct uae_mixer_dsp *)(intptr_t)h,
+                                       p, (int)frames, (int)channels);
+    (*env)->ReleaseFloatArrayElements(env, buf, p, 0);
+    return active;
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_MixerDsp_nativeMixerDspReset(JNIEnv *env, jobject thiz,
+                                                    jlong h)
+{
+    if (h) uae_mixer_dsp_request_reset((struct uae_mixer_dsp *)(intptr_t)h);
 }

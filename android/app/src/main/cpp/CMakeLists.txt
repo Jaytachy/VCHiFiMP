@@ -16,6 +16,7 @@ add_library(usbdirect SHARED
         usb_audio_engine.c
         uae_gate.c
         uae_dsp.c
+        uae_mixer_dsp.c
         uae_pack.c
         jni_bridge.c
         resampler.c

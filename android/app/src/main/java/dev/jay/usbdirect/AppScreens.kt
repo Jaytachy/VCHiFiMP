@@ -1472,14 +1472,6 @@ fun OutputScreen(
                         rate = curveRate,
                         modifier = Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 4.dp)
                     )
-                    if (!exclusive) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "EQ applies to USB DAC output only",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary
-                        )
-                    }
                 }
             }
 
