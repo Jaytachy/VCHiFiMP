@@ -67,12 +67,13 @@ fun NowPlayingScreen(
     dynamicColors: Boolean = true,
     exclusive: Boolean = true,
     dspEnabled: Boolean = false,
-    hardwareVolume: Boolean = false
+    hardwareVolume: Boolean = false,
+    ditherOn: Boolean = true
 ) {
     val transport = rememberTransport(transportFlow)
     val verdict = signalVerdict(
-        exclusive, dspEnabled, transport.resampled,
-        hardwareVolume, volume
+        exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+        transport.sourceBits, transport.deviceBits, ditherOn
     )
 
     // Artwork must follow the *current* track. Resolving it outside this

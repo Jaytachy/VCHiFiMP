@@ -547,7 +547,8 @@ class MainActivity : ComponentActivity() {
                             },
                             exclusive = exclusive,
                             dspEnabled = dspEnabled,
-                            hardwareVolume = hardwareVolume
+                            hardwareVolume = hardwareVolume,
+                            ditherOn = dither
                         )
                         return@Surface
                     }
@@ -697,7 +698,8 @@ class MainActivity : ComponentActivity() {
                                     onOpenAlbum = { openAlbum = it },
                                     dspEnabled = dspEnabled,
                                     hardwareVolume = hardwareVolume,
-                                    volume = volume
+                                    volume = volume,
+                                    ditherOn = dither
                                 )
                                 Tab.MUSIC -> MusicScreen(
                                     albums = albums,
@@ -751,6 +753,7 @@ class MainActivity : ComponentActivity() {
                                     dspEnabled = dspEnabled,
                                     dspConfig = dspConfig,
                                     dspPresetName = dspPresetName,
+                                    ditherOn = dither,
                                     onDspEnabled = { applyDspEnabled(it) },
                                     onOpenEq = { showEq = true }
                                 )

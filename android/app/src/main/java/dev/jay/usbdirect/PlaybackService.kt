@@ -450,11 +450,12 @@ class PlaybackService : Service() {
             MediaProbe.of(this, t.uri) else null
         val srcRate = t.sampleRate.takeIf { it > 0 } ?: probe?.sampleRate ?: 0
         val srcBits = t.bitDepth.takeIf { it > 0 } ?: probe?.bitDepth ?: 0
+        val srcBitsLabel = if (srcBits == 16) 16 else 24
         _state.value = _state.value.copy(
             playing = true, paused = false, index = i, title = t.title,
             positionMs = fromMs, durationMs = t.durationMs, error = null,
             artist = t.artist, album = t.album, codec = codec, format = "",
-            missingUri = null, sourceRate = srcRate, sourceBits = srcBits,
+            missingUri = null, sourceRate = srcRate, sourceBits = srcBitsLabel,
             deviceRate = 0, deviceBits = outBits, resampled = false
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
@@ -462,7 +463,8 @@ class PlaybackService : Service() {
         startForegroundInternal(t.title)
         publish(PlaybackState.STATE_PLAYING)
         requestAudioFocus()
-        player.start(d, t.uri, 48000, outBits, volume, fromMs, useMixer = mixer)
+        player.start(d, t.uri, 48000, outBits, volume, fromMs,
+                     useMixer = mixer, sourceBits = srcBits)
     }
 
     fun play() = if (index >= 0) playAt(index, pausedAtMs) else Unit
@@ -711,7 +713,8 @@ class PlaybackService : Service() {
         _state.value = _state.value.copy(
             index = idx, title = t.title, artist = t.artist, album = t.album,
             codec = codec, positionMs = 0, durationMs = t.durationMs,
-            missingUri = null, sourceRate = srcRate, sourceBits = srcBits,
+            missingUri = null, sourceRate = srcRate,
+            sourceBits = if (srcBits == 16) 16 else 24,
             resampled = srcRate > 0 && _state.value.deviceRate > 0 &&
                         srcRate != _state.value.deviceRate
         )

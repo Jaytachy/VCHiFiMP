@@ -53,6 +53,11 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
         if (handle != 0L) nativeSetResampled(handle, on)
     }
 
+    /** Decoded source depth; drives dither on 24→16 reductions. */
+    fun setSourceBits(bits: Int) {
+        if (handle != 0L) nativeSetSourceBits(handle, bits)
+    }
+
     /** Enable/disable the native biquad rack (ramped wet/dry in C). */
     fun setDspEnabled(on: Boolean) {
         if (handle != 0L) nativeDspEnable(handle, on)
@@ -126,6 +131,7 @@ class UsbAudioEngine private constructor(internal var handle: Long) : AutoClosea
     private external fun nativeSetPpm(h: Long, ppm: Float)
     private external fun nativeSetDither(h: Long, on: Boolean)
     private external fun nativeSetResampled(h: Long, on: Boolean)
+    private external fun nativeSetSourceBits(h: Long, bits: Int)
     private external fun nativeDspEnable(h: Long, on: Boolean)
     private external fun nativeDspSetBands(
         h: Long, params: DoubleArray, nbands: Int,

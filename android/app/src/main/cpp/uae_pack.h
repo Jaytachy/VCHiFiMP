@@ -8,7 +8,8 @@
  * modified when software volume is not unity, the DSP rack is active, or
  * libsamplerate is active. The user toggle remains a master allow.
  */
-int uae_dither_needed(int allow, float volume, int dsp_enabled, int resampled);
+int uae_dither_needed(int allow, float volume, int dsp_enabled, int resampled,
+                      int src_bits, int out_bits);
 
 /* Quantize one float sample into S16 or packed S24_3LE; advances the RNG. */
 void uae_pack_sample(float v, unsigned char *p, int subframe_bytes,

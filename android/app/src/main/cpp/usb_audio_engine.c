@@ -90,6 +90,7 @@ struct uae {
     float volume;
     int dither;             /* user master allow for TPDF dither */
     volatile int resampled; /* producer is using libsamplerate */
+    volatile int src_bits;  /* decoded source depth; 0 = unknown */
     double ppm;
     uint64_t rendered;      /* frames packed since open */
     volatile uint64_t frames_done;  /* frames in URBs the kernel has completed */
@@ -398,8 +399,10 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
 
     /* One decision per URB: dither is only useful when a previous stage
      * actually changed the sample (volume, DSP or resampling). */
+    int out_bits = e->channels ? (e->bpf / e->channels) * 8 : 0;
     int dither_urb = uae_dither_needed(
-        e->dither, e->volume, dsp_enabled, e->resampled);
+        e->dither, e->volume, dsp_enabled, e->resampled,
+        e->src_bits, out_bits);
 
     for (int k = 0; k < PKTS_PER_URB; k++) {
         *acc += fpm;
@@ -796,6 +799,11 @@ void uae_set_dither(struct uae *e, int on)
 void uae_set_resampled(struct uae *e, int on)
 {
     if (e) e->resampled = on ? 1 : 0;
+}
+
+void uae_set_source_bits(struct uae *e, int bits)
+{
+    if (e) e->src_bits = bits > 0 ? bits : 0;
 }
 
 void uae_set_volume(struct uae *e, float v)

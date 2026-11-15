@@ -25,10 +25,12 @@ static float pack_frand(uint32_t *state)
     return (float)(uae_pack_rand(state) & 0x00ffffffu) / 16777216.0f;
 }
 
-int uae_dither_needed(int allow, float volume, int dsp_enabled, int resampled)
+int uae_dither_needed(int allow, float volume, int dsp_enabled, int resampled,
+                      int src_bits, int out_bits)
 {
     if (!allow) return 0;
-    return volume != 1.0f || dsp_enabled || resampled;
+    return volume != 1.0f || dsp_enabled || resampled ||
+           (src_bits > 0 && out_bits > 0 && src_bits > out_bits);
 }
 
 void uae_pack_sample(float v, unsigned char *p, int subframe_bytes,

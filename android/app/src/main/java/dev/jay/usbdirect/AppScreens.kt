@@ -256,7 +256,8 @@ fun HomeScreen(
     onOpenAlbum: (LibAlbum) -> Unit,
     dspEnabled: Boolean = false,
     hardwareVolume: Boolean = false,
-    volume: Float = 1f
+    volume: Float = 1f,
+    ditherOn: Boolean = true
 ) {
     val transport = rememberTransport(transportFlow)
     val showingNow = transport.title.isNotEmpty()
@@ -266,8 +267,8 @@ fun HomeScreen(
             if (rateLabel.isNotEmpty()) "$dacName \u2022 $rateLabel" else dacName
         } else "Phone audio"
     val verdict = signalVerdict(
-        exclusive, dspEnabled, transport.resampled,
-        hardwareVolume, volume
+        exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+        transport.sourceBits, transport.deviceBits, ditherOn
     )
     val bitPerfect = transport.playing && transport.format.isNotEmpty() && verdict.perfect
     val processed = transport.playing && transport.format.isNotEmpty() && !verdict.perfect
@@ -1289,6 +1290,7 @@ fun OutputScreen(
     dspEnabled: Boolean = false,
     dspConfig: DspConfig = DspConfig(),
     dspPresetName: String = "Flat",
+    ditherOn: Boolean = true,
     onDspEnabled: (Boolean) -> Unit = {},
     onOpenEq: () -> Unit = {}
 ) {
@@ -1321,8 +1323,8 @@ fun OutputScreen(
 
             val streamActive = transport.format.isNotEmpty()
             val verdict = signalVerdict(
-                exclusive, dspEnabled, transport.resampled,
-                hardwareVolume, volume
+                exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+                transport.sourceBits, transport.deviceBits, ditherOn
             )
             val perfect = streamActive && verdict.perfect
             val processed = streamActive && !verdict.perfect
@@ -1491,7 +1493,16 @@ fun OutputScreen(
                             transport.sourceBits.takeIf { it > 0 }?.let { "$it-bit" }
                         ).joinToString(" · ").ifEmpty { "—" }
                         Metric("Source", src)
-                        Metric("DAC", "${fmtRate(t.rate.toInt())} · ${t.bits}-bit · alt ${t.alt}")
+                        val reduced = transport.sourceBits > 0 && t.bits > 0 &&
+                            transport.sourceBits > t.bits
+                        Metric(
+                            "DAC",
+                            "${fmtRate(t.rate.toInt())} · ${t.bits}-bit · alt ${t.alt}" +
+                            if (reduced) {
+                                " · ${transport.sourceBits}→${t.bits}" +
+                                if (!ditherOn) " · undithered" else ""
+                            } else ""
+                        )
                         Metric("Resample", if (transport.resampled) "yes" else "no")
                         Metric(
                             "DSP",

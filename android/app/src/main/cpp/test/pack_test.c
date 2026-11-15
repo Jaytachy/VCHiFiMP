@@ -73,15 +73,34 @@ int main(void)
     printf("%s  dither path changes samples at volume 0.5: %d/4096\n",
            differs > 0 ? "PASS" : "FAIL", differs);
 
-    int g_ok =
-        uae_dither_needed(1, 1.0f, 0, 0) == 0 &&
-        uae_dither_needed(1, 0.5f, 0, 0) == 1 &&
-        uae_dither_needed(1, 1.0f, 1, 0) == 1 &&
-        uae_dither_needed(1, 1.0f, 0, 1) == 1 &&
-        uae_dither_needed(0, 0.5f, 1, 1) == 0;
-    printf("%s  auto-dither gate\n", g_ok ? "PASS" : "FAIL");
+    /* 24-in -> 16-out at unity must dither, unlike plain truncation. */
+    int red_differs = 0;
+    uint32_t r3 = 3, r4 = 4;
+    for (int i = 0; i < 4096; i++) {
+        int32_t u = (int32_t)(rnd(&seed) & 0xFFFFFFu);
+        int32_t in24 = (u & 0x800000) ? (u | ~0xFFFFFF) : u;
+        float v = (float)in24 / 8388608.0f;
+        unsigned char a[2], b[2];
+        uae_pack_sample(v, a, 2, 0, &r3);
+        uae_pack_sample(v, b, 2, 1, &r4);
+        if (memcmp(a, b, 2) != 0) red_differs++;
+    }
+    printf("%s  24>16 dither changes samples: %d/4096\n",
+           red_differs > 0 ? "PASS" : "FAIL", red_differs);
 
-    int fail = bad16 || bad24 || differs == 0 || !g_ok;
+    int g_ok =
+        uae_dither_needed(1, 1.0f, 0, 0, 16, 16) == 0 &&
+        uae_dither_needed(1, 0.5f, 0, 0, 16, 16) == 1 &&
+        uae_dither_needed(1, 1.0f, 1, 0, 16, 16) == 1 &&
+        uae_dither_needed(1, 1.0f, 0, 1, 16, 16) == 1 &&
+        uae_dither_needed(1, 1.0f, 0, 0, 24, 16) == 1 &&
+        uae_dither_needed(1, 1.0f, 0, 0, 16, 24) == 0 &&
+        uae_dither_needed(1, 1.0f, 0, 0, 24, 24) == 0 &&
+        uae_dither_needed(0, 1.0f, 0, 0, 24, 16) == 0;
+    printf("%s  auto-dither gate incl. bit-depth reduction\n",
+           g_ok ? "PASS" : "FAIL");
+
+    int fail = bad16 || bad24 || differs == 0 || red_differs == 0 || !g_ok;
     printf("%s\n", fail ? "FAILED" : "ALL PASS");
     return fail ? 1 : 0;
 }

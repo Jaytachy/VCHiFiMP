@@ -251,14 +251,23 @@ fun signalVerdict(
     dspEnabled: Boolean,
     resampled: Boolean,
     hardwareVolume: Boolean,
-    volume: Float
+    volume: Float,
+    sourceBits: Int,
+    dacBits: Int,
+    ditherOn: Boolean
 ): SignalVerdict {
     val reasons = ArrayList<String>(4)
     if (!exclusive) reasons.add("Mixer")
     if (dspEnabled) reasons.add("EQ")
     if (resampled) reasons.add("Resampled")
-    // Dither is auto-skipped at unity volume / DSP off / no resample, so it
-    // is not a processed-path reason here.
+    if (sourceBits > 0 && dacBits > 0 && sourceBits > dacBits) {
+        reasons.add(
+            "Bit-depth reduction ($sourceBits>$dacBits)" +
+            if (!ditherOn) " undithered" else ""
+        )
+    }
+    // Dither is auto-skipped at unity volume / DSP off / no resample / no
+    // bit-depth reduction, so it is not a processed-path reason here.
     if (!hardwareVolume && volume < 0.999f) reasons.add("SW vol")
     return SignalVerdict(reasons.isEmpty(), reasons)
 }

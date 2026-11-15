@@ -61,6 +61,8 @@ class UsbDirectPlayer(private val context: Context) {
     @Volatile private var dspEnabled = false
     /** True when PcmSink is using libsamplerate for this stream. */
     @Volatile private var resampled = false
+    /** Decoded source depth; unknown/float sources are treated as 24-bit. */
+    @Volatile private var sourceBits = 24
     @Volatile private var keepEngineForReuse = false
     private var activeDeviceId = -1
     private var thread: Thread? = null
@@ -79,11 +81,12 @@ class UsbDirectPlayer(private val context: Context) {
     val isRunning: Boolean get() = running
 
     fun start(device: UsbDevice?, uri: Uri, rate: Int, bits: Int, volume: Float,
-              startMs: Long = 0L, useMixer: Boolean = false) {
+              startMs: Long = 0L, useMixer: Boolean = false, sourceBits: Int = 24) {
         // Play at the file's own rate when the DAC supports it, so nothing is
         // resampled; otherwise fall back to the requested rate.
         lastReportedPosition = startMs
         currentOutBits = bits
+        this.sourceBits = if (sourceBits == 16) 16 else 24
         val src = probeRate(uri)
         val dev = if (src in SUPPORTED_RATES) src else rate
         resampled = src != dev
@@ -178,6 +181,9 @@ class UsbDirectPlayer(private val context: Context) {
         }
     }
 
+    private fun sourceBitsFor(t: Track): Int =
+        if (t.bitDepth == 16) 16 else 24
+
     private fun probeChannels(uri: Uri): Int {
         val ex = MediaExtractor()
         return try {
@@ -198,6 +204,7 @@ class UsbDirectPlayer(private val context: Context) {
     /** Plays a 1 kHz tone straight from native, no decoding involved. */
     fun startTone(device: UsbDevice, rate: Int, bits: Int, volume: Float, seconds: Int) {
         resampled = false
+        sourceBits = 24
         startInternal(device, rate, bits, volume) { eng -> playTone(eng, rate, seconds) }
     }
 
@@ -226,6 +233,7 @@ class UsbDirectPlayer(private val context: Context) {
                 live.setDspConfig(dspConfig)
                 live.setDspEnabled(dspEnabled)
                 live.setResampled(resampled)
+                live.setSourceBits(sourceBits)
                 running = true
                 thread = Thread {
                     var completed = false
@@ -275,6 +283,7 @@ class UsbDirectPlayer(private val context: Context) {
                 eng.setDspConfig(dspConfig)
                 eng.setDspEnabled(dspEnabled)
                 eng.setResampled(resampled)
+                eng.setSourceBits(sourceBits)
 
                 analyzer.start()
                 Log.i("VCProbe", "engine open ok: " + rate + " Hz / " + bits + "-bit")
@@ -473,7 +482,7 @@ class UsbDirectPlayer(private val context: Context) {
                 break
             }
 
-            s.commitBoundary(nextIndex)
+            s.commitBoundary(nextIndex, sourceBitsFor(nextTrack))
             Log.i("VCProbe", "gapless: continuing into ${nextTrack.title}")
             currentUri = nextTrack.uri
             currentStart = 0
@@ -487,6 +496,9 @@ class UsbDirectPlayer(private val context: Context) {
     private fun decodeRaw(extractor: MediaExtractor, sink: PcmSink, format: MediaFormat) {
         val pcmEncoding = if (format.containsKey(MediaFormat.KEY_PCM_ENCODING))
             format.getInteger(MediaFormat.KEY_PCM_ENCODING) else 2 /* PCM_16BIT */
+        sink.setSourceBits(
+            if (pcmEncoding == 4 || pcmEncoding == 21) 24 else 16
+        )
 
         val buf = ByteBuffer.allocateDirect(1 shl 16).order(ByteOrder.nativeOrder())
         var reads = 0
@@ -543,6 +555,7 @@ class UsbDirectPlayer(private val context: Context) {
                     if (info.size > 0) {
                         val enc = if (format.containsKey(MediaFormat.KEY_PCM_ENCODING))
                             format.getInteger(MediaFormat.KEY_PCM_ENCODING) else 2
+                        if (enc == 4 || enc == 21) sink.setSourceBits(24)
                         when (enc) {
                             4 -> sink.pushFloat(ob.asFloatBuffer())
                             21 -> sink.push24(ob)
@@ -573,6 +586,8 @@ class UsbDirectPlayer(private val context: Context) {
         fun playedFrames(): Long
         /** Frames buffered between us and the listener. */
         fun bufferedFrames(): Long
+        /** Decoded source depth for dither/badge decisions. */
+        fun setSourceBits(bits: Int) {}
     }
 
     private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
@@ -581,6 +596,7 @@ class UsbDirectPlayer(private val context: Context) {
         override fun eos() = eng.eos()
         override fun playedFrames(): Long = eng.framesPlayed()
         override fun bufferedFrames(): Long = eng.bufferedFrames()
+        override fun setSourceBits(bits: Int) = eng.setSourceBits(bits)
     }
 
     private class MixerTarget(
@@ -641,6 +657,7 @@ class UsbDirectPlayer(private val context: Context) {
         private var lastPlayedMs = 0L
         private var boundaryFrame = 0L
         private var pendingBoundary = -1
+        private var pendingBoundaryBits = 24
         private var trackStartFrames = 0L
 
         init {
@@ -734,6 +751,7 @@ class UsbDirectPlayer(private val context: Context) {
                 trackStartFrames = boundaryFrame
                 val idx = pendingBoundary
                 pendingBoundary = -1
+                target.setSourceBits(pendingBoundaryBits)
                 onBoundary?.invoke(idx)     // metadata flips on the audible sample
             }
             val rel = played - trackStartFrames
@@ -748,11 +766,14 @@ class UsbDirectPlayer(private val context: Context) {
 
         fun channels(): Int = srcCh
 
+        fun setSourceBits(bits: Int) = target.setSourceBits(bits)
+
         /** Flush what is queued, then arm the audible switch at this frame. */
-        fun commitBoundary(index: Int) {
+        fun commitBoundary(index: Int, sourceBits: Int) {
             flushOut()
             boundaryFrame = framesOut
             pendingBoundary = index
+            pendingBoundaryBits = sourceBits
         }
 
         fun flush() {
