@@ -1437,6 +1437,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val ACTION_USB_PERMISSION = "dev.jay.usbdirect.USB_PERMISSION"
+        private const val ACTION_USB_PERMISSION = "dev.jay.vchifimp.USB_PERMISSION"
     }
 }

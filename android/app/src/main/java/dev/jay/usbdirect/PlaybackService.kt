@@ -924,10 +924,10 @@ class PlaybackService : Service() {
         private const val CHANNEL = "playback"
         private const val PREFS = "vc"
         private const val NOTIF_ID = 1
-        const val ACTION_STOP = "dev.jay.usbdirect.STOP"
-        const val ACTION_PAUSE = "dev.jay.usbdirect.PAUSE"
-        const val ACTION_RESUME = "dev.jay.usbdirect.RESUME"
-        const val ACTION_PREVIOUS = "dev.jay.usbdirect.PREVIOUS"
-        const val ACTION_NEXT = "dev.jay.usbdirect.NEXT"
+        const val ACTION_STOP = "dev.jay.vchifimp.STOP"
+        const val ACTION_PAUSE = "dev.jay.vchifimp.PAUSE"
+        const val ACTION_RESUME = "dev.jay.vchifimp.RESUME"
+        const val ACTION_PREVIOUS = "dev.jay.vchifimp.PREVIOUS"
+        const val ACTION_NEXT = "dev.jay.vchifimp.NEXT"
     }
 }
