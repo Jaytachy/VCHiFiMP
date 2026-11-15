@@ -625,7 +625,7 @@ class UsbDirectPlayer(private val context: Context) {
      * interpolated. v1 quality: fine for equal rates, adequate otherwise.
      * TODO: swap in libsamplerate for arbitrary ratios.
      */
-    private interface PcmTarget {
+    internal interface PcmTarget {
         fun write(buf: FloatBuffer, bytes: ByteBuffer, frames: Int): Int
         fun eos()
         /** Frames actually consumed by the sink, not frames handed to it. */
@@ -677,7 +677,7 @@ class UsbDirectPlayer(private val context: Context) {
         override fun resetDsp() = dsp.reset()
     }
 
-    private class PcmSink(
+    internal class PcmSink(
         private val target: PcmTarget,
         private val srcRate: Int,
         private val outRate: Int,
@@ -832,6 +832,10 @@ class UsbDirectPlayer(private val context: Context) {
                 outBuf.clear()
                 throw IllegalStateException("sink write failed ($wrote/$frames)")
             }
+            // Partial blocks (gapless commitBoundary, seek flush, stop flush)
+            // shrink the window above. Restore the full-capacity state so the
+            // next track's relative emit() cannot run past the shrunk limit.
+            outBuf.clear()
             framesOut += frames
 
             val played = target.playedFrames()
