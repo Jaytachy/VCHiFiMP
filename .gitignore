@@ -12,3 +12,4 @@ android/keystore.properties
 
 # machine-specific SDK path
 local.properties
+.kotlin/
