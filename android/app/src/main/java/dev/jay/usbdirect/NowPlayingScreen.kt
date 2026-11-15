@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 package dev.jay.usbdirect
 
 import androidx.compose.animation.core.animateFloatAsState

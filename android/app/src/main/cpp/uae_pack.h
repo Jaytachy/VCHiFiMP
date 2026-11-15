@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef UAE_PACK_H
 #define UAE_PACK_H
 

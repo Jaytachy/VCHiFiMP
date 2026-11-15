@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef USB_AUDIO_ENGINE_H
 
 #include <stdint.h>

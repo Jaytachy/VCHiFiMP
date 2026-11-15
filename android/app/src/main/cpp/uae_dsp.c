@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * uae_dsp.c - 12-slot biquad rack (10 PEQ + HPF + LPF), RBJ cookbook.
  *

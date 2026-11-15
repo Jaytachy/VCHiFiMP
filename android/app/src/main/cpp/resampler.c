@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * Thin wrapper over libsamplerate (BSD-2-Clause) for the Android build.
  * Only used when the track's rate is not natively supported by the DAC.

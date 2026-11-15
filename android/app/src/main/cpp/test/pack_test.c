@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * Host test for the unity-volume packer and automatic dither gate.
  *

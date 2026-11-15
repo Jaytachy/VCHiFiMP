@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * uae_pack.c - exact integer packing with optional TPDF dither.
  *

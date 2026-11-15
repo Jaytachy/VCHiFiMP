@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * Host-side DSP rack tests. Not part of the Android build.
  *

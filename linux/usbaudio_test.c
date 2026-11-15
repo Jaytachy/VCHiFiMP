@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 // usbaudio_test.c - direct isochronous USB audio output test for UAC1 devices
 //
 // Usage:

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * jni_bridge.c - thin JNI layer over the usbfs engine.
  *

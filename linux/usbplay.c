@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 // usbplay.c - direct isochronous USB audio playback for UAC1 devices
 //
 // Plays a WAV/FLAC file (via libsndfile) straight to the DAC through usbfs,

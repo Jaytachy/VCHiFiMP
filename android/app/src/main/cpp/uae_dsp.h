@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef UAE_DSP_H
 #define UAE_DSP_H
 

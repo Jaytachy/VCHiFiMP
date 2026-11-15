@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
  * usb_audio_engine.c - raw usbfs isochronous audio output (UAC1).
  *
