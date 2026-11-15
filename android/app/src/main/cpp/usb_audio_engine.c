@@ -26,6 +26,7 @@
 #include <linux/usb/ch9.h>
 
 #include "usb_audio_engine.h"
+#include "uae_gate.h"
 #include "uae_dsp.h"
 #include "uae_pack.h"
 
@@ -82,8 +83,7 @@ struct urb_ctx {
 struct uae {
     int fd, iface, alt, ep, maxpkt, bpf, channels, rate;
 
-    pthread_mutex_t lock;
-    pthread_cond_t can_read, can_write;
+    struct uae_gate gate;
 
     float *ring;
     size_t head, tail, filled;
@@ -121,7 +121,6 @@ struct uae {
     unsigned long interval_count;
     char summary[768];
 
-    volatile int running;
     volatile int failed;
     int started;
     pthread_t thread;
@@ -415,8 +414,8 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
 
         size_t got;
         if (block) {
-            pthread_mutex_lock(&e->lock);
-            while (e->running && e->filled < (size_t)n) {
+            pthread_mutex_lock(&e->gate.lock);
+            while (e->gate.running && e->filled < (size_t)n) {
                 struct timespec ts;
                 clock_gettime(CLOCK_MONOTONIC, &ts);
                 ts.tv_nsec += 20 * 1000000L;
@@ -424,16 +423,16 @@ static void fill_urb(struct uae *e, struct urb_ctx *c, double *acc, int *prev,
                     ts.tv_sec++;
                     ts.tv_nsec -= 1000000000L;
                 }
-                if (pthread_cond_timedwait(&e->can_read, &e->lock, &ts) != 0)
+                if (pthread_cond_timedwait(&e->gate.can_read, &e->gate.lock, &ts) != 0)
                     break;   /* underrun: pad with silence */
             }
             got = ring_read(e, tmp, (size_t)n);
-            pthread_cond_signal(&e->can_write);
-            pthread_mutex_unlock(&e->lock);
+            pthread_cond_signal(&e->gate.can_write);
+            pthread_mutex_unlock(&e->gate.lock);
         } else {
-            pthread_mutex_lock(&e->lock);
+            pthread_mutex_lock(&e->gate.lock);
             got = ring_read(e, tmp, (size_t)n);
-            pthread_mutex_unlock(&e->lock);
+            pthread_mutex_unlock(&e->gate.lock);
         }
 
         e->frames_packed += (uint64_t)n;
@@ -476,7 +475,7 @@ static void *pump(void *arg)
         if (!ctx[i].buf) {
             set_err(e, "out of memory");
             e->failed = 1;
-            e->running = 0;
+            e->gate.running = 0;
             goto cleanup;
         }
         ctx[i].urb.type = USBDEVFS_URB_TYPE_ISO;
@@ -494,14 +493,14 @@ static void *pump(void *arg)
                  i, strerror(errno), ctx[i].urb.buffer_length);
             set_err(e, "SUBMITURB: %s", strerror(errno));
             e->failed = 1;
-            e->running = 0;
+            e->gate.running = 0;
             goto cleanup;
         }
         ctx[i].submitted = 1;
     }
 
     int reaped = 0;
-    while (e->running) {
+    while (e->gate.running) {
         struct usbdevfs_urb *u = NULL;
         if (ioctl(e->fd, USBDEVFS_REAPURBNDELAY, &u) < 0) {
             if (errno == EAGAIN) { usleep(300); continue; }
@@ -569,9 +568,7 @@ struct uae *uae_open(int fd, int rate, int bits)
     e->dither = 1;
     e->ctrl_iface = -1;
     e->nifaces = 0;
-    pthread_mutex_init(&e->lock, NULL);
-    pthread_cond_init(&e->can_read, NULL);
-    pthread_cond_init(&e->can_write, NULL);
+    uae_gate_init(&e->gate);
     /* Initialize early so uae_close() on a partially-open engine is valid. */
     uae_dsp_init(&e->dsp, 0.0);
 
@@ -750,10 +747,10 @@ struct uae *uae_open(int fd, int rate, int bits)
 
     uae_dsp_prepare_rate(&e->dsp, (double)e->rate);
 
-    e->running = 1;
+    e->gate.running = 1;
     if (pthread_create(&e->thread, NULL, pump, e) != 0) {
         set_err(e, "pthread_create failed");
-        e->running = 0;
+        e->gate.running = 0;
         e->started = 0;
         return e;
     }
@@ -763,16 +760,35 @@ struct uae *uae_open(int fd, int rate, int bits)
 
 int uae_ok(struct uae *e)
 {
-    return e && e->running && !e->failed && e->errmsg[0] == 0;
+    return e && e->gate.running && !e->failed && e->errmsg[0] == 0;
 }
 
 int uae_write(struct uae *e, const float *src, int frames)
 {
-    if (!uae_ok(e)) return -1;
+    if (!e) return UAE_ERR_CLOSING;
+
+    uint32_t epoch = 0;
+    int rc = uae_gate_enter(&e->gate, &epoch);
+    if (rc) return rc;
+
+    pthread_mutex_lock(&e->gate.lock);
+    rc = uae_gate_check_locked(&e->gate, epoch);
+    if (!rc && (e->failed || e->errmsg[0])) rc = -1;
+    pthread_mutex_unlock(&e->gate.lock);
+    if (rc) {
+        uae_gate_leave(&e->gate);
+        return rc;
+    }
+
     int done = 0;
-    while (done < frames && e->running) {
-        pthread_mutex_lock(&e->lock);
-        while (e->filled >= RING_FRAMES - 4096 && e->running) {
+    while (done < frames) {
+        pthread_mutex_lock(&e->gate.lock);
+
+        /* The predicate is re-evaluated after every wake, including timeouts
+         * and spurious wakeups. Never touch the ring without a fresh check. */
+        while (e->filled >= RING_FRAMES - 4096) {
+            rc = uae_gate_check_locked(&e->gate, epoch);
+            if (rc) break;
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
             ts.tv_nsec += 50 * 1000000L;
@@ -780,16 +796,25 @@ int uae_write(struct uae *e, const float *src, int frames)
                 ts.tv_sec++;
                 ts.tv_nsec -= 1000000000L;
             }
-            pthread_cond_timedwait(&e->can_write, &e->lock, &ts);
+            pthread_cond_timedwait(&e->gate.can_write, &e->gate.lock, &ts);
         }
+        if (!rc)
+            rc = uae_gate_check_locked(&e->gate, epoch);
+        if (rc) {
+            pthread_mutex_unlock(&e->gate.lock);
+            break;
+        }
+
         size_t n = ring_write(e, src + (size_t)done * e->channels,
                               (size_t)(frames - done));
-        pthread_cond_signal(&e->can_read);
-        pthread_mutex_unlock(&e->lock);
+        pthread_cond_signal(&e->gate.can_read);
+        pthread_mutex_unlock(&e->gate.lock);
         if (n == 0) break;
         done += (int)n;
     }
-    return done;
+
+    uae_gate_leave(&e->gate);
+    return rc ? rc : done;
 }
 
 void uae_set_dither(struct uae *e, int on)
@@ -821,7 +846,14 @@ void uae_set_volume(struct uae *e, float v)
  */
 int uae_switch_format(struct uae *e, int rate, int bits)
 {
-    if (!e || !e->running) return -1;
+    if (!e) return -1;
+
+    /* Serialize seek/switch against abort, resume, and close. */
+    uae_gate_op_lock(&e->gate);
+    if (e->gate.closed || e->gate.aborting) {
+        uae_gate_op_unlock(&e->gate);
+        return UAE_ERR_CLOSING;
+    }
 
     struct uae_alt *pick = NULL;
     for (int pass = 0; pass < 2 && !pick; pass++) {
@@ -834,25 +866,31 @@ int uae_switch_format(struct uae *e, int rate, int bits)
             break;
         }
     }
-    if (!pick) return -2;
+    if (!pick) {
+        uae_gate_op_unlock(&e->gate);
+        return -2;
+    }
 
-    /* stop the pump; it frees its URBs on the way out */
-    e->running = 0;
-    pthread_mutex_lock(&e->lock);
-    pthread_cond_broadcast(&e->can_read);
-    pthread_cond_broadcast(&e->can_write);
-    pthread_mutex_unlock(&e->lock);
+    /* Gate producers, drain stragglers, then stop the pump. */
+    int rc = uae_gate_begin_switch(&e->gate);
+    if (rc) {
+        uae_gate_op_unlock(&e->gate);
+        return rc;
+    }
     if (e->started) {
         pthread_join(e->thread, NULL);
         e->started = 0;
     }
 
-    pthread_mutex_lock(&e->lock);
+    /* Clearing the ring starts a new epoch. A writer that captured the old
+     * epoch can no longer write after it wakes. Ring allocation is untouched. */
+    pthread_mutex_lock(&e->gate.lock);
     e->head = e->tail = 0;
     e->filled = 0;
     e->primed = 0;
-    pthread_cond_broadcast(&e->can_write);
-    pthread_mutex_unlock(&e->lock);
+    e->gate.epoch++;
+    pthread_cond_broadcast(&e->gate.can_write);
+    pthread_mutex_unlock(&e->gate.lock);
 
     e->frames_done = 0;
     e->rendered = 0;
@@ -869,8 +907,11 @@ int uae_switch_format(struct uae *e, int rate, int bits)
     struct usbdevfs_setinterface si;
     si.interface = (unsigned)pick->iface;
     si.altsetting = (unsigned)pick->altset;
-    if (ioctl(e->fd, USBDEVFS_SETINTERFACE, &si) < 0)
+    if (ioctl(e->fd, USBDEVFS_SETINTERFACE, &si) < 0) {
+        /* Leave the gate aborting; the caller will close the engine. */
+        uae_gate_op_unlock(&e->gate);
         return -3;
+    }
 
     unsigned char fr[3] = { (unsigned char)(rate & 0xff),
                             (unsigned char)((rate >> 8) & 0xff),
@@ -888,12 +929,21 @@ int uae_switch_format(struct uae *e, int rate, int bits)
     LOGI("uae: switched to %d Hz / %d-bit (alt %d, maxpkt %d)",
          rate, bits, e->alt, e->maxpkt);
 
-    e->running = 1;
+    rc = uae_gate_end_switch(&e->gate);
+    if (rc) {
+        uae_gate_op_unlock(&e->gate);
+        return rc;
+    }
     if (pthread_create(&e->thread, NULL, pump, e) != 0) {
-        e->running = 0;
+        pthread_mutex_lock(&e->gate.lock);
+        e->gate.running = 0;
+        e->gate.aborting = 1;
+        pthread_mutex_unlock(&e->gate.lock);
+        uae_gate_op_unlock(&e->gate);
         return -4;
     }
     e->started = 1;
+    uae_gate_op_unlock(&e->gate);
     return 0;
 }
 
@@ -907,9 +957,9 @@ int uae_get_telemetry(struct uae *e, long long *out, int max)
 {
     if (!e || max < 17) return 0;
     size_t filled;
-    pthread_mutex_lock(&e->lock);
+    pthread_mutex_lock(&e->gate.lock);
     filled = e->filled;
-    pthread_mutex_unlock(&e->lock);
+    pthread_mutex_unlock(&e->gate.lock);
 
     uint64_t latency_frames = filled;
     if (e->frames_packed > e->frames_done)
@@ -945,9 +995,9 @@ uint64_t uae_buffered_frames(struct uae *e)
 {
     if (!e) return 0;
     uint64_t filled;
-    pthread_mutex_lock(&e->lock);
+    pthread_mutex_lock(&e->gate.lock);
     filled = e->filled;
-    pthread_mutex_unlock(&e->lock);
+    pthread_mutex_unlock(&e->gate.lock);
     uint64_t flight = e->frames_packed > e->frames_done
                     ? e->frames_packed - e->frames_done : 0;
     return filled + flight;
@@ -986,14 +1036,31 @@ void uae_reset_dsp(struct uae *e)
     if (e) uae_dsp_request_reset(&e->dsp);
 }
 
+void uae_abort(struct uae *e)
+{
+    if (!e) return;
+    uae_gate_op_lock(&e->gate);
+    uae_gate_abort(&e->gate);
+    uae_gate_op_unlock(&e->gate);
+}
+
+void uae_resume(struct uae *e)
+{
+    if (!e) return;
+    uae_gate_op_lock(&e->gate);
+    uae_gate_resume(&e->gate);
+    uae_gate_op_unlock(&e->gate);
+}
+
 void uae_close(struct uae *e)
 {
     if (!e) return;
-    e->running = 0;
-    pthread_mutex_lock(&e->lock);
-    pthread_cond_broadcast(&e->can_read);
-    pthread_cond_broadcast(&e->can_write);
-    pthread_mutex_unlock(&e->lock);
+
+    /* closed is permanent. Gate producers off first, drain in-flight writers,
+     * then join the pump and free. */
+    uae_gate_op_lock(&e->gate);
+    uae_gate_close(&e->gate);
+
     if (e->started) pthread_join(e->thread, NULL);
 
     struct usbdevfs_setinterface si0;
@@ -1030,8 +1097,7 @@ void uae_close(struct uae *e)
 
     uae_dsp_destroy(&e->dsp);
     free(e->ring);
-    pthread_mutex_destroy(&e->lock);
-    pthread_cond_destroy(&e->can_read);
-    pthread_cond_destroy(&e->can_write);
+    uae_gate_op_unlock(&e->gate);
+    uae_gate_destroy(&e->gate);
     free(e);
 }

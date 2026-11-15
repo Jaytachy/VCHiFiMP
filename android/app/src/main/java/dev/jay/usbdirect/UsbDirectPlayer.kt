@@ -19,6 +19,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
+/** Expected producer exit after stop/seek, not a detach. */
+private class PlaybackAborted : RuntimeException()
+
 /**
  * Decodes a file to PCM and streams it into the raw-usbfs engine.
  *
@@ -148,6 +151,8 @@ class UsbDirectPlayer(private val context: Context) {
                 Log.i("VCProbe", "mixer sink open: " + rate + " Hz")
                 onInfo?.invoke("mixer: ${rate} Hz")
                 decodeLoop(uri, MixerTarget(track) { mixerVolume }, rate, startMs)
+            } catch (_: PlaybackAborted) {
+                // seek/stop expected this writer to leave
             } catch (t: Throwable) {
                 Log.e("VCProbe", "mixer failed: ${t.message}", t)
                 if (running) onError?.invoke(t.message ?: t.toString())
@@ -219,41 +224,49 @@ class UsbDirectPlayer(private val context: Context) {
             keepEngineForReuse = true
             val gen = ++session          // invalidate the old thread's callbacks
             running = false
+            live.abort()                 // wake a writer blocked inside uae_write
             val old = thread
             thread = null
+            var oldAlive = false
             if (old != null && old !== Thread.currentThread()) {
                 old.interrupt()
                 try { old.join(2000) } catch (_: InterruptedException) { }
+                oldAlive = old.isAlive
             }
             keepEngineForReuse = false
 
-            if (live.switchFormat(rate, bits) == 0) {
-                Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
-                // switch_format recompiles coefficients for the new rate; push
-                // the Kotlin-side config again so the two never drift.
-                live.setDspConfig(dspConfig)
-                live.setDspEnabled(dspEnabled)
-                live.setResampled(resampled)
-                live.setSourceBits(sourceBits)
-                running = true
-                thread = Thread {
-                    var completed = false
-                    try {
-                        analyzer.start()
-                        live.setVolume(volume)
-                        live.setDither(dither)
-                        body(live)
-                        completed = true
-                    } catch (t: Throwable) {
-                        Log.e("VCProbe", "decode failed: ${t.message}", t)
-                        if (running) onError?.invoke(t.message ?: t.toString())
-                    } finally {
-                        if (!keepEngineForReuse && (!completed || !running)) closeEngine()
-                        running = false
-                        if (gen == session) onFinished?.invoke()
-                    }
-                }.also { it.isDaemon = true; it.start() }
-                return
+            if (!oldAlive) {
+                live.resume()
+                if (live.switchFormat(rate, bits) == 0) {
+                    Log.i("VCProbe", "reused engine -> $rate Hz / $bits-bit (no teardown)")
+                    // switch_format recompiles coefficients for the new rate; push
+                    // the Kotlin-side config again so the two never drift.
+                    live.setDspConfig(dspConfig)
+                    live.setDspEnabled(dspEnabled)
+                    live.setResampled(resampled)
+                    live.setSourceBits(sourceBits)
+                    running = true
+                    thread = Thread {
+                        var completed = false
+                        try {
+                            analyzer.start()
+                            live.setVolume(volume)
+                            live.setDither(dither)
+                            body(live)
+                            completed = true
+                        } catch (_: PlaybackAborted) {
+                            // seek/stop expected this writer to leave
+                        } catch (t: Throwable) {
+                            Log.e("VCProbe", "decode failed: ${t.message}", t)
+                            if (running) onError?.invoke(t.message ?: t.toString())
+                        } finally {
+                            if (!keepEngineForReuse && (!completed || !running)) closeEngine()
+                            running = false
+                            if (gen == session) onFinished?.invoke()
+                        }
+                    }.also { it.isDaemon = true; it.start() }
+                    return
+                }
             }
             closeEngine()
         }
@@ -291,6 +304,8 @@ class UsbDirectPlayer(private val context: Context) {
                 onInfo?.invoke("engine: ${rate} Hz / $bits-bit")
                 body(eng)
                 completed = true
+            } catch (_: PlaybackAborted) {
+                // seek/stop expected this writer to leave
             } catch (t: Throwable) {
                 Log.e("VCProbe", "engine failed: ${t.message}", t)
                 if (running) onError?.invoke(t.message ?: t.toString())
@@ -309,8 +324,10 @@ class UsbDirectPlayer(private val context: Context) {
     }
 
     private fun closeEngine() {
-        engine?.close()
+        val eng = engine
         engine = null
+        eng?.abort()        // never take the write guard behind a blocked writer
+        eng?.close()
         connection?.close()
         connection = null
         activeDeviceId = -1
@@ -320,14 +337,19 @@ class UsbDirectPlayer(private val context: Context) {
         session++            // invalidate any in-flight completion callback
         analyzer.stop()
         running = false
-        closeEngine()
+        engine?.abort()      // writers see aborting and leave uae_write promptly
 
         val t = thread
         thread = null
         if (t != null && t !== Thread.currentThread()) {
             t.interrupt()
-            try { t.join(1500) } catch (_: InterruptedException) { }
+            try {
+                t.join(1500)
+                if (t.isAlive) Log.w("VCProbe", "stop: join timed out")
+            } catch (_: InterruptedException) { }
         }
+
+        closeEngine()
     }
 
     /** Audible position of the current track, from reaped URBs. */
@@ -446,6 +468,8 @@ class UsbDirectPlayer(private val context: Context) {
 
             if (sink == null) {
                 sink = PcmSink(target, srcRate, outRate, srcCh, currentStart,
+                    sessionAtStart = myGen,
+                    currentSession = { session },
                     progress = { ms -> lastReportedPosition = ms; onProgress?.invoke(ms) },
                     tap = { b, n ->
                         analyzer.delayFrames = target.bufferedFrames()
@@ -589,6 +613,8 @@ class UsbDirectPlayer(private val context: Context) {
         fun bufferedFrames(): Long
         /** Decoded source depth for dither/badge decisions. */
         fun setSourceBits(bits: Int) {}
+        /** True after stop/seek/close; a write failure is expected, not detach. */
+        fun isAborting(): Boolean = false
     }
 
     private class UsbTarget(private val eng: UsbAudioEngine) : PcmTarget {
@@ -598,6 +624,7 @@ class UsbDirectPlayer(private val context: Context) {
         override fun playedFrames(): Long = eng.framesPlayed()
         override fun bufferedFrames(): Long = eng.bufferedFrames()
         override fun setSourceBits(bits: Int) = eng.setSourceBits(bits)
+        override fun isAborting(): Boolean = eng.isAborting
     }
 
     private class MixerTarget(
@@ -627,6 +654,8 @@ class UsbDirectPlayer(private val context: Context) {
         private val outRate: Int,
         private val srcCh: Int,
         private val startMs: Long,
+        private val sessionAtStart: Int,
+        private val currentSession: () -> Int,
         private val progress: ((Long) -> Unit)?,
         private val tap: ((FloatBuffer, Int) -> Unit)?,
         private val onBoundary: ((Int) -> Unit)?,
@@ -735,14 +764,43 @@ class UsbDirectPlayer(private val context: Context) {
             // FloatBuffer position, so set the window explicitly.
             outBuf.position(0)
             outBuf.limit(frames * 2)
-            val start = framesOut
             tap?.invoke(outBuf, frames)
-            val wrote = target.write(outBuf, outBytes, frames)
-            outBuf.clear()
-            if (wrote <= 0) {
-                // The DAC vanished (or the mixer died). Without this the loop
-                // keeps "writing" into nothing, reaches EOF normally, and the
-                // service treats it as a finished track and advances the queue.
+            var wrote: Int
+            var resets = 0
+            while (true) {
+                wrote = target.write(outBuf, outBytes, frames)
+                if (wrote > 0) {
+                    if (sessionAtStart != currentSession() || target.isAborting()) {
+                        outBuf.clear()
+                        throw PlaybackAborted()
+                    }
+                    break
+                }
+
+                val stale = sessionAtStart != currentSession()
+                val aborting = target.isAborting()
+                if (wrote == UsbAudioEngine.ERR_RESET && !stale && !aborting) {
+                    // The ring was cleared under a live session (seek/reset).
+                    // Rewrite the same block in the new epoch.
+                    if (++resets <= 8) {
+                        Thread.yield()
+                        continue
+                    }
+                    outBuf.clear()
+                    throw PlaybackAborted()
+                }
+                if (wrote == UsbAudioEngine.ERR_CLOSING ||
+                    wrote == UsbAudioEngine.ERR_RESET || stale || aborting) {
+                    // stop()/seek()/close() asked the producer to leave. This is
+                    // not a detach and must not advance the queue or fall back.
+                    outBuf.clear()
+                    throw PlaybackAborted()
+                }
+
+                // Genuine USB failure with the same session still current: the
+                // DAC vanished. Keep framesOut unadvanced so the service can
+                // pause at the last confirmed frame and fall back to the mixer.
+                outBuf.clear()
                 throw IllegalStateException("sink write failed ($wrote/$frames)")
             }
             framesOut += frames

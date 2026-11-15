@@ -2,6 +2,7 @@
 #ifndef USB_AUDIO_ENGINE_H
 
 #include <stdint.h>
+#include "uae_gate.h"
 #define USB_AUDIO_ENGINE_H
 
 struct uae;
@@ -14,6 +15,14 @@ const char *uae_error(struct uae *e);
 
 /* interleaved float32, device channel count. Blocking, returns frames taken. */
 int  uae_write(struct uae *e, const float *src, int frames);
+
+/* Stop producers and the pump without waiting or freeing. Idempotent; safe to
+ * call from any thread that can reach the engine while uae_write/close run. */
+void uae_abort(struct uae *e);
+
+/* Clear the transient abort gate after the decode thread has joined. No-op
+ * once uae_close has set the permanent closed flag. */
+void uae_resume(struct uae *e);
 
 void uae_set_volume(struct uae *e, float v);
 void uae_set_dither(struct uae *e, int on);   /* 0.0 .. 1.0 */

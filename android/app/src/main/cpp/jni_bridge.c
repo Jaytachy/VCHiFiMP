@@ -204,6 +204,18 @@ Java_dev_jay_usbdirect_UsbAudioEngine_nativeEos(JNIEnv *env, jobject thiz, jlong
 }
 
 JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeAbort(JNIEnv *env, jobject thiz, jlong h)
+{
+    if (h) uae_abort((struct uae *)(intptr_t)h);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_jay_usbdirect_UsbAudioEngine_nativeResume(JNIEnv *env, jobject thiz, jlong h)
+{
+    if (h) uae_resume((struct uae *)(intptr_t)h);
+}
+
+JNIEXPORT void JNICALL
 Java_dev_jay_usbdirect_UsbAudioEngine_nativeClose(JNIEnv *env, jobject thiz, jlong h)
 {
     if (h) uae_close((struct uae *)(intptr_t)h);
