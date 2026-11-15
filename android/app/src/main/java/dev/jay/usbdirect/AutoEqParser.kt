@@ -247,7 +247,7 @@ object DspMath {
 data class SignalVerdict(val perfect: Boolean, val reasons: List<String>)
 
 fun signalVerdict(
-    exclusive: Boolean,
+    usingMixer: Boolean,
     dspEnabled: Boolean,
     resampled: Boolean,
     hardwareVolume: Boolean,
@@ -257,7 +257,7 @@ fun signalVerdict(
     ditherOn: Boolean
 ): SignalVerdict {
     val reasons = ArrayList<String>(4)
-    if (!exclusive) reasons.add("Mixer")
+    if (usingMixer) reasons.add("Android mixer, not bit-perfect")
     if (dspEnabled) reasons.add("EQ")
     if (resampled) reasons.add("Resampled")
     if (sourceBits > 0 && dacBits > 0 && sourceBits > dacBits) {

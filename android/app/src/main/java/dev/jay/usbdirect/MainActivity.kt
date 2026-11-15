@@ -136,6 +136,15 @@ class MainActivity : ComponentActivity() {
                 exclusive = false
                 svc.setExclusive(false)
                 dacName = ""
+                // A cold start can race USB enumeration; retry once so the
+                // first tap does not commit the queue to the mixer.
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    val late = audioDevice()
+                    if (late != null) {
+                        if (usbManager.hasPermission(late)) attachDac(late)
+                        else requestUsb(late)
+                    }
+                }, 500)
             }
             lifecycleScope.launch { svc.deviceName.collect { dacName = it ?: "" } }
             lifecycleScope.launch { svc.exclusiveState.collect { exclusive = it } }
@@ -582,40 +591,46 @@ class MainActivity : ComponentActivity() {
 
                     val artist = openArtist
                     if (album != null) {
-                        AlbumDetailScreen(
-                            album = album,
-                            artVersion = artVersion,
-                            onBack = { openAlbum = null },
-                            onPlayAll = { playList(album.tracks, 0) },
-                            onShuffle = { playList(album.tracks.shuffled(), 0) },
-                            onPlayTrack = { playList(album.tracks, it) },
-                            onTrackMenu = { sheetTrack = it }
-                        )
+                        DetailShell {
+                            AlbumDetailScreen(
+                                album = album,
+                                artVersion = artVersion,
+                                onBack = { openAlbum = null },
+                                onPlayAll = { playList(album.tracks, 0) },
+                                onShuffle = { playList(album.tracks.shuffled(), 0) },
+                                onPlayTrack = { playList(album.tracks, it) },
+                                onTrackMenu = { sheetTrack = it }
+                            )
+                        }
                         return@Surface
                     }
                     if (artist != null) {
-                        ArtistDetailScreen(
-                            name = artist,
-                            albums = albums.filter { it.artist == artist },
-                            tracks = tracks.filter {
-                                it.artist.ifEmpty { "Unknown artist" } == artist
-                            },
-                            artVersion = artVersion,
-                            onBack = { openArtist = null },
-                            onOpenAlbum = { openAlbum = it },
-                            onPlayList = { list, i -> playList(list, i) },
-                            onTrackMenu = { sheetTrack = it }
-                        )
+                        DetailShell {
+                            ArtistDetailScreen(
+                                name = artist,
+                                albums = albums.filter { it.artist == artist },
+                                tracks = tracks.filter {
+                                    it.artist.ifEmpty { "Unknown artist" } == artist
+                                },
+                                artVersion = artVersion,
+                                onBack = { openArtist = null },
+                                onOpenAlbum = { openAlbum = it },
+                                onPlayList = { list, i -> playList(list, i) },
+                                onTrackMenu = { sheetTrack = it }
+                            )
+                        }
                         return@Surface
                     }
                     if (showFavorites) {
-                        FavoritesScreen(
-                            tracks = tracks.filter { favorites.contains(it.uri.toString()) },
-                            artVersion = artVersion,
-                            onBack = { showFavorites = false },
-                            onPlayList = { list, i -> playList(list, i) },
-                            onTrackMenu = { sheetTrack = it }
-                        )
+                        DetailShell {
+                            FavoritesScreen(
+                                tracks = tracks.filter { favorites.contains(it.uri.toString()) },
+                                artVersion = artVersion,
+                                onBack = { showFavorites = false },
+                                onPlayList = { list, i -> playList(list, i) },
+                                onTrackMenu = { sheetTrack = it }
+                            )
+                        }
                         return@Surface
                     }
 
@@ -647,26 +662,7 @@ class MainActivity : ComponentActivity() {
                     Scaffold(
                         bottomBar = {
                             Column(Modifier.navigationBarsPadding()) {
-                                MiniPlayer(
-                                    transportFlow = service?.state,
-                                    volume = volume,
-                                    artVersion = artVersion,
-                                    swipeUpToExpand = swipeUpMini,
-                                    onPlayPause = {
-                                        if (service?.state?.value?.playing == true) service?.pause()
-                                        else service?.resume()
-                                    },
-                                    onPrev = { service?.previous() },
-                                    onNext = { service?.next() },
-                                    onSeek = { service?.seekTo(it) },
-                                    onVolume = {
-                                        volume = it
-                                        service?.setVolume(it)
-                                        getPreferences(MODE_PRIVATE).edit()
-                                            .putFloat("volume", it).apply()
-                                    },
-                                    onExpand = { showNowPlaying = true }
-                                )
+                                AppMiniPlayer()
                                 BottomNav(tab, { tab = it })
                             }
                         }
@@ -1182,6 +1178,46 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    /** Shared mini player so detail routes keep transport visible. */
+    @Composable
+    private fun AppMiniPlayer() {
+        MiniPlayer(
+            transportFlow = service?.state,
+            volume = volume,
+            artVersion = artVersion,
+            swipeUpToExpand = swipeUpMini,
+            onPlayPause = {
+                if (service?.state?.value?.playing == true) service?.pause()
+                else service?.resume()
+            },
+            onPrev = { service?.previous() },
+            onNext = { service?.next() },
+            onSeek = { service?.seekTo(it) },
+            onVolume = {
+                volume = it
+                service?.setVolume(it)
+                getPreferences(MODE_PRIVATE).edit()
+                    .putFloat("volume", it).apply()
+            },
+            onExpand = { showNowPlaying = true }
+        )
+    }
+
+    /** Detail routes keep the mini player but omit the bottom navigation. */
+    @Composable
+    private fun DetailShell(content: @Composable () -> Unit) {
+        Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            bottomBar = {
+                Column(Modifier.navigationBarsPadding()) {
+                    AppMiniPlayer()
+                }
+            }
+        ) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize()) { content() }
         }
     }
 

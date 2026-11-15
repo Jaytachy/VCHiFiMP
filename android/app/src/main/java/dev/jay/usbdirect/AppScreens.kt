@@ -267,7 +267,7 @@ fun HomeScreen(
             if (rateLabel.isNotEmpty()) "$dacName \u2022 $rateLabel" else dacName
         } else "Phone audio"
     val verdict = signalVerdict(
-        exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+        transport.usingMixer, dspEnabled, transport.resampled, hardwareVolume, volume,
         transport.sourceBits, transport.deviceBits, ditherOn
     )
     val bitPerfect = transport.playing && transport.format.isNotEmpty() && verdict.perfect
@@ -1323,7 +1323,8 @@ fun OutputScreen(
 
             val streamActive = transport.format.isNotEmpty()
             val verdict = signalVerdict(
-                exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+                transport.usingMixer, dspEnabled, transport.resampled,
+                hardwareVolume, volume,
                 transport.sourceBits, transport.deviceBits, ditherOn
             )
             val perfect = streamActive && verdict.perfect

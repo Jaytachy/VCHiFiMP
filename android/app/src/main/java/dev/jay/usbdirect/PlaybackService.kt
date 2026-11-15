@@ -78,7 +78,9 @@ data class TransportState(
     /** Output rate/depth actually handed to the DAC. */
     val deviceRate: Int = 0,
     val deviceBits: Int = 0,
-    val resampled: Boolean = false
+    val resampled: Boolean = false,
+    /** True when the active sink is AudioTrack/MixerTarget, not raw usbfs. */
+    val usingMixer: Boolean = false
 )
 
 /**
@@ -229,6 +231,8 @@ class PlaybackService : Service() {
             ACTION_STOP -> stop()
             ACTION_PAUSE -> pause()
             ACTION_RESUME -> resume()
+            ACTION_PREVIOUS -> previous()
+            ACTION_NEXT -> next()
         }
         return START_STICKY
     }
@@ -426,10 +430,10 @@ class PlaybackService : Service() {
     fun playAt(i: Int, fromMs: Long = 0L) {
         Log.i("VCProbe", "playAt($i, fromMs=$fromMs)")
         val t = queue.getOrNull(i) ?: return
-        // If the DAC was unplugged earlier and has come back (same queue, queue
-        // advance, resume), take it again. Without this the whole queue stayed
-        // on the mixer until a fresh album rebuilt the device.
-        if (device == null && deviceLost && autoReclaim && !mixerByUser) {
+        // Try the DAC on every start when it isn't claimed yet, not only after
+        // an explicit detach. A cold start can miss enumeration and leave us on
+        // the mixer; findAttachedDac() already checks USB permission.
+        if (device == null && autoReclaim && !mixerByUser) {
             findAttachedDac()?.let {
                 Log.i("VCProbe", "re-acquired DAC: ${it.productName}")
                 device = it
@@ -456,7 +460,8 @@ class PlaybackService : Service() {
             positionMs = fromMs, durationMs = t.durationMs, error = null,
             artist = t.artist, album = t.album, codec = codec, format = "",
             missingUri = null, sourceRate = srcRate, sourceBits = srcBitsLabel,
-            deviceRate = 0, deviceBits = outBits, resampled = false
+            deviceRate = 0, deviceBits = outBits, resampled = false,
+            usingMixer = mixer
         )
         saveLastPlayed(LastPlayed(t.uri.toString(), t.title, t.artist, t.album,
                                    t.durationMs, codec, fromMs))
@@ -830,6 +835,16 @@ class PlaybackService : Service() {
             Intent(this, PlaybackService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val previousIntent = PendingIntent.getService(
+            this, 3,
+            Intent(this, PlaybackService::class.java).setAction(ACTION_PREVIOUS),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val nextIntent = PendingIntent.getService(
+            this, 4,
+            Intent(this, PlaybackService::class.java).setAction(ACTION_NEXT),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
 
         val n: Notification = Notification.Builder(this, CHANNEL)
             .setContentTitle(title.ifEmpty { "VCHiFiMP" })
@@ -839,9 +854,15 @@ class PlaybackService : Service() {
             .setContentIntent(open)
             .setOngoing(playing)
             .addAction(
+                Notification.Action.Builder(null, "Previous", previousIntent).build()
+            )
+            .addAction(
                 Notification.Action.Builder(
                     null, if (playing) "Pause" else "Play", toggleIntent
                 ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(null, "Next", nextIntent).build()
             )
             .addAction(
                 Notification.Action.Builder(null, "Stop", stopIntent).build()
@@ -849,7 +870,7 @@ class PlaybackService : Service() {
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1)
+                    .setShowActionsInCompactView(0, 1, 2)
             )
             .build()
 
@@ -901,5 +922,7 @@ class PlaybackService : Service() {
         const val ACTION_STOP = "dev.jay.usbdirect.STOP"
         const val ACTION_PAUSE = "dev.jay.usbdirect.PAUSE"
         const val ACTION_RESUME = "dev.jay.usbdirect.RESUME"
+        const val ACTION_PREVIOUS = "dev.jay.usbdirect.PREVIOUS"
+        const val ACTION_NEXT = "dev.jay.usbdirect.NEXT"
     }
 }

@@ -41,7 +41,10 @@ fun AlbumDetailScreen(
     val bits = album.tracks.firstOrNull()?.bitDepth ?: 0
     val rate = album.tracks.firstOrNull()?.sampleRate ?: 0
 
-    LazyColumn(Modifier.fillMaxSize().statusBarsPadding()) {
+    LazyColumn(
+        Modifier.fillMaxSize().statusBarsPadding(),
+        contentPadding = PaddingValues(bottom = 96.dp)
+    ) {
         item {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
@@ -139,7 +142,10 @@ fun ArtistDetailScreen(
     onPlayList: (List<LibTrack>, Int) -> Unit,
     onTrackMenu: (LibTrack) -> Unit
 ) {
-    LazyColumn(Modifier.fillMaxSize().statusBarsPadding()) {
+    LazyColumn(
+        Modifier.fillMaxSize().statusBarsPadding(),
+        contentPadding = PaddingValues(bottom = 96.dp)
+    ) {
         item {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),

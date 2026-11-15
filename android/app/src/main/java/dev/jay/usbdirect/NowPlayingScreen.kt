@@ -72,7 +72,7 @@ fun NowPlayingScreen(
 ) {
     val transport = rememberTransport(transportFlow)
     val verdict = signalVerdict(
-        exclusive, dspEnabled, transport.resampled, hardwareVolume, volume,
+        transport.usingMixer, dspEnabled, transport.resampled, hardwareVolume, volume,
         transport.sourceBits, transport.deviceBits, ditherOn
     )
 
