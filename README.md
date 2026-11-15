@@ -57,6 +57,7 @@ Android app (`v1.1.1`):
 - Native DSP rack: 10-band parametric EQ, high-pass and low-pass filters,
   preamp, auto headroom and true bypass.
 - EQ screen with a live response curve and AutoEQ `.txt` import.
+- EQ works on USB DAC, phone speaker and headphone jack.
 - Signal-path panel and bit-perfect indicator. The indicator is green only with
   exclusive USB, no DSP, no resampling, no bit-depth reduction, and hardware
   volume or software volume at 100%; otherwise it is amber PROCESSED with
