@@ -16,8 +16,8 @@ android {
         applicationId = "dev.jay.vchifimp"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.1.2-beta.1"
+        versionCode = 9
+        versionName = "1.1.2-beta.2"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
