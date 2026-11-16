@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a problem with VCHiFiMP
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App version
+      placeholder: "1.1.3"
+    validations:
+      required: true
+
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model + Android version
+      placeholder: "Samsung Galaxy A54, Android 17"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: output
+    attributes:
+      label: Output
+      options:
+        - USB DAC (exclusive)
+        - Phone speaker (mixer)
+        - Headphone jack (mixer)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: dac
+    attributes:
+      label: DAC VID:PID and name
+      description: Shown on the Output screen, or in `lsusb` / the VCProbe log.
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+
+  - type: textarea
+    id: logcat
+    attributes:
+      label: Logcat
+      description: "`adb logcat -s VCProbe` captured right after the problem, about 50 lines. Remove anything private."
+      render: shell
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        **Audible issues:** logs can't prove clicks or distortion, so please describe what you heard and when.

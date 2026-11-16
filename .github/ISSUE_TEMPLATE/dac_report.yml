@@ -1,0 +1,79 @@
+name: DAC compatibility report
+description: Report whether a USB DAC works with VCHiFiMP
+labels: ["dac"]
+body:
+  - type: input
+    id: dac_name
+    attributes:
+      label: DAC name
+    validations:
+      required: false
+
+  - type: input
+    id: vid_pid
+    attributes:
+      label: VID:PID
+      placeholder: "1234:5678"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: uac_version
+    attributes:
+      label: UAC version (if known)
+      options:
+        - UAC1
+        - UAC2
+        - Unknown
+    validations:
+      required: false
+
+  - type: input
+    id: sample_rates
+    attributes:
+      label: Sample rates tried
+      placeholder: "44.1 kHz, 48 kHz, 96 kHz"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: claim_play
+    attributes:
+      label: Did it claim and play?
+      options:
+        - "Yes"
+        - "No"
+        - "Partly"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: badge
+    attributes:
+      label: Badge shown
+      options:
+        - BIT-PERFECT
+        - PROCESSED
+    validations:
+      required: false
+
+  - type: textarea
+    id: logcat
+    attributes:
+      label: VCProbe logcat excerpt
+      description: "`adb logcat -s VCProbe` while connecting the DAC and starting playback."
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        Only UAC1 class-compliant DACs are supported at the moment. UAC2 reports are still useful for planning.
