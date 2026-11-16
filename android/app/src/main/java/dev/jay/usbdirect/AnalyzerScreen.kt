@@ -18,6 +18,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.min
@@ -39,6 +42,39 @@ fun SpectrumPanel(
     val display = remember { FloatArray(n) { DB_FLOOR } }
     var tick by remember { mutableIntStateOf(0) }
     var levels by remember { mutableStateOf(EMPTY_FRAME) }
+
+    // Analysis only runs while this panel is composed AND the screen is on.
+    // ON_STOP covers screen-off/background; onDispose covers leaving Output.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(analyzer, lifecycleOwner) {
+        if (analyzer == null) return@DisposableEffect onDispose { }
+        var held = false
+        fun acquire() {
+            if (!held) {
+                held = true
+                analyzer.acquireConsumer()
+            }
+        }
+        fun release() {
+            if (held) {
+                held = false
+                analyzer.releaseConsumer()
+            }
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> acquire()
+                Lifecycle.Event.ON_STOP -> release()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) acquire()
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            release()
+        }
+    }
 
     LaunchedEffect(analyzer) {
         if (analyzer == null) return@LaunchedEffect

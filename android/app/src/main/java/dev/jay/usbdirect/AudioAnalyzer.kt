@@ -2,6 +2,7 @@
 package dev.jay.usbdirect
 
 import java.nio.FloatBuffer
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,7 +34,10 @@ class AudioAnalyzer {
         const val BANDS = 64
         private const val FFT_N = 8192
         private const val RING = 1 shl 18   // must hold the full decode buffer (~2.7 s)
-        private const val TICK_MS = 8L
+        // 30 Hz is enough for the 64-band curve and the peak/rms meter; the
+        // UI interpolates between frames at display refresh.
+        private const val TICK_MS = 33L
+        private const val SNAPSHOTS = 4
         // The meter uses a much shorter window than the FFT: an 8192-point
         // window is 170 ms, which is far too slow to show a peak.
         private const val METER_N = 2048
@@ -49,7 +53,10 @@ class AudioAnalyzer {
     /** Frames to lag the analysis by so it matches what is actually audible. */
     @Volatile var delayFrames: Long = 0
     @Volatile private var running = false
-    private var worker: Thread? = null
+    @Volatile private var worker: Thread? = null
+    /** Number of composed, visible UI consumers (spectrum/level/clip). */
+    private val consumers = AtomicInteger(0)
+    @Volatile private var tickCount = 0L
 
     // analysis scratch, owned by the worker thread only
     private val real = FloatArray(FFT_N)
@@ -58,6 +65,11 @@ class AudioAnalyzer {
         0.5f - 0.5f * cos(2.0 * Math.PI * it / (FFT_N - 1)).toFloat()
     }
     private val smoothed = FloatArray(BANDS) { -100f }
+    private val raw = FloatArray(BANDS)
+    // Published band arrays rotate so the worker never allocates per tick and
+    // a frame already handed to a collector is not overwritten immediately.
+    private val snapshots = Array(SNAPSHOTS) { FloatArray(BANDS) { -100f } }
+    private var snapshotSlot = 0
     private val bandLo = IntArray(BANDS)
     private val bandHi = IntArray(BANDS)
     private var bandRate = 0
@@ -85,7 +97,8 @@ class AudioAnalyzer {
 
     /** Called from the audio thread. Must stay allocation-free and non-blocking. */
     fun offer(buf: FloatBuffer, frames: Int, gain: Float) {
-        if (!running) return
+        // No consumer is looking: stay O(1) and leave the ring untouched.
+        if (!running || consumers.get() <= 0) return
         var w = writeIdx
         var i = 0
         while (i < frames) {
@@ -98,24 +111,64 @@ class AudioAnalyzer {
         writeIdx = w
     }
 
+    /** A composed, visible consumer is now reading frames. */
+    fun acquireConsumer() {
+        consumers.incrementAndGet()
+        maybeStartWorker()
+    }
+
+    /** That consumer is gone or its screen went off; stop waking when idle. */
+    fun releaseConsumer() {
+        if (consumers.decrementAndGet() <= 0) {
+            consumers.set(0)
+            worker?.interrupt()
+        }
+    }
+
     fun start() {
         if (running) return
         running = true
-        worker = Thread {
-            while (running) {
-                val t0 = System.nanoTime()
-                try { analyse() } catch (t: Throwable) { /* never kill the worker */ }
-                val spent = (System.nanoTime() - t0) / 1_000_000
-                val sleep = TICK_MS - spent
-                if (sleep > 0) Thread.sleep(sleep)
-            }
-        }.also { it.isDaemon = true; it.priority = Thread.NORM_PRIORITY; it.start() }
+        maybeStartWorker()
     }
 
     fun stop() {
         running = false
-        worker?.join(200)
+        val w = worker
+        if (w != null) {
+            w.interrupt()
+            try { w.join(200) } catch (_: InterruptedException) { }
+        }
         worker = null
+    }
+
+    /** Run the worker only while playback is live and a consumer is visible. */
+    private fun maybeStartWorker() {
+        if (!running || consumers.get() <= 0) return
+        synchronized(this) {
+            if (!running || consumers.get() <= 0) return
+            val live = worker
+            if (live != null && live.isAlive) return
+            worker = Thread {
+                while (running && consumers.get() > 0) {
+                    tickCount++
+                    val t0 = System.nanoTime()
+                    try { analyse() } catch (t: Throwable) { /* never kill the worker */ }
+                    val spent = (System.nanoTime() - t0) / 1_000_000
+                    val sleep = TICK_MS - spent
+                    if (sleep > 0) {
+                        try { Thread.sleep(sleep) } catch (_: InterruptedException) { break }
+                    }
+                }
+            }.also { it.isDaemon = true; it.priority = Thread.NORM_PRIORITY; it.start() }
+        }
+    }
+
+    internal fun consumerCountForTest(): Int = consumers.get()
+    internal fun workerAliveForTest(): Boolean = worker?.isAlive == true
+    internal fun tickCountForTest(): Long = tickCount
+    internal fun awaitWorkerExitForTest(timeoutMs: Long): Boolean {
+        val w = worker ?: return true
+        return try { w.join(timeoutMs); !w.isAlive } catch (_: InterruptedException) { false }
     }
 
     private fun analyse() {
@@ -147,7 +200,6 @@ class AudioAnalyzer {
 
         // magnitude -> dB, scaled so a full-scale sine reads 0 dB
         val scale = 4.0f / FFT_N
-        val raw = FloatArray(BANDS)
         for (b in 0 until BANDS) {
             // RMS across the band instead of max: at 5.9 Hz resolution the
             // bass bands hold only one or two bins, and max made them jump.
@@ -184,8 +236,11 @@ class AudioAnalyzer {
         }
         if (peak >= 0.999f) clipLatchUntil = now + 1500
 
+        val bands = snapshots[snapshotSlot]
+        snapshotSlot = (snapshotSlot + 1) % SNAPSHOTS
+        smoothed.copyInto(bands)
         _frame.value = Frame(
-            bands = smoothed.copyOf(),
+            bands = bands,
             peakDb = peakDb,
             rmsDb = rmsDb,
             peakHoldDb = peakHold,
